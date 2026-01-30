@@ -1,0 +1,31 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dSYM/
+
+# Binaries
+client
+server
+trusted
+setup
+aes_client
+aes_trusted
+
+# SGX-generated files
+*.manifest
+*.manifest.sgx
+*.sig
+*.token
+
+# Benchmark outputs and data blobs
+data/
+benchmark_results.txt
+*.bin
+*.txt
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~

@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
+libos.entrypoint = "/trusted"
+
+loader.log_level = "{{ log_level }}"
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/local/lib"
+
+loader.insecure__use_cmdline_argv = true
+
+fs.mounts = [
+  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+  { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+  { path = "/usr/lib", uri = "file:/usr/lib" },
+  { path = "/usr/local/lib", uri = "file:/usr/local/lib" },
+  { path = "/trusted", uri = "file:{{ execdir }}/trusted" },
+  { path = "/data", uri = "file:{{ execdir }}/data" },
+]
+
+sgx.debug = false
+sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
+sgx.enclave_size = "2G"
+sgx.max_threads = 16
+
+sgx.trusted_files = [
+  "file:{{ gramine.libos }}",
+  "file:{{ gramine.runtimedir() }}/",
+  "file:{{ arch_libdir }}/",
+  "file:/usr/lib/",
+  "file:/usr/local/lib/",
+  "file:{{ execdir }}/trusted",
+]
+
+sgx.allowed_files = [
+  "file:{{ execdir }}/data/",
+]
