@@ -1,10 +1,10 @@
-// setup.cpp - Generates TERSE keys and precomputations
+// setup.cpp
 #include "terse.h"
 #include <iostream>
+#include <filesystem>
 #include <chrono>
 #include <numeric>
-#include <filesystem>
-#include <limits>
+#include <omp.h>
 
 using namespace std;
 using namespace std::chrono;
@@ -15,25 +15,20 @@ static void ensure_data_dir() {
 
 static void save_size_to_file(const string& filename, size_t value) {
     ofstream out(filename);
-    if (!out) {
-        throw runtime_error("Failed to open " + filename);
-    }
+    if (!out) throw runtime_error("Failed to open " + filename);
     out << value << endl;
 }
 
 static void save_client_precomputes(const vector<TERSEClient>& clients,
-                                    size_t expected_streams) {
+                                   size_t expected_streams) {
     for (size_t idx = 0; idx < clients.size(); idx++) {
         if (clients[idx].precomputed_p.size() != expected_streams) {
-            throw runtime_error("Client " + to_string(idx) +
-                                " precomputation size mismatch");
+            throw runtime_error("Client " + to_string(idx) + " precomputation size mismatch");
         }
 
         string filename = "data/client_precompute_" + to_string(idx) + ".bin";
         ofstream out(filename, ios::binary);
-        if (!out) {
-            throw runtime_error("Failed to open " + filename);
-        }
+        if (!out) throw runtime_error("Failed to open " + filename);
 
         size_t n_entries = clients[idx].precomputed_p.size();
         out.write(reinterpret_cast<const char*>(&n_entries), sizeof(n_entries));
@@ -48,6 +43,8 @@ static void save_client_precomputes(const vector<TERSEClient>& clients,
 }
 
 int main(int argc, char* argv[]) {
+    omp_set_num_threads(1);
+
     if (argc < 3 || argc > 4) {
         cerr << "Usage: " << argv[0] << " <n_clients> <n_timestamps> [vector_dim]" << endl;
         return 1;
@@ -64,7 +61,7 @@ int main(int argc, char* argv[]) {
 
     ensure_data_dir();
 
-    TERSEParams params(8192, 65537, 1, HEStd_128_classic, 3.2);
+    TERSEParams params(4096, 65537, 0, HEStd_128_classic, 3.2);
     TERSESystem system(params);
 
     vector<TERSEClient> clients(n_clients);
@@ -89,6 +86,7 @@ int main(int argc, char* argv[]) {
             duration_cast<nanoseconds>(client_end - client_start).count() / 1e6;
     }
 
+    omp_set_num_threads(0);
     TERSEServer server = system.generate_server_key(clients);
     auto keygen_end = high_resolution_clock::now();
 
@@ -107,63 +105,64 @@ int main(int argc, char* argv[]) {
     cout << "Key generation time (total): "
          << total_keygen_ms << " ms" << endl;
 
+    omp_set_num_threads(1);
+
     size_t total_streams = n_timestamps * vector_dim;
-    uint64_t current_theta = numeric_limits<uint64_t>::max();
-    DCRTPoly current_A_theta;
+    size_t n_theta = (total_streams + params.poly_modulus_degree - 1) / params.poly_modulus_degree;
 
     double a_theta_generation_ms = 0;
     double single_client_precompute_ms = 0;
     double server_precompute_ms = 0;
-    size_t a_theta_count = 0;
 
     cout << "\n=== Precomputation Phase ===" << endl;
     cout << "Total streams: " << total_streams << endl;
     cout << "Poly modulus degree: " << params.poly_modulus_degree << endl;
+    cout << "Number of theta values: " << n_theta << endl;
 
     auto precomp_total_start = high_resolution_clock::now();
 
-    for (size_t stream_idx = 0; stream_idx < total_streams; stream_idx++) {
-        TimestampSplit ts = TERSESystem::parse_timestamp(stream_idx, params.poly_modulus_degree);
+    for (uint64_t theta = 0; theta < n_theta; theta++) {
+        auto theta_start = high_resolution_clock::now();
+        DCRTPoly A_theta = system.generate_A_theta(theta);
+        auto theta_end = high_resolution_clock::now();
+        double theta_ms = duration_cast<nanoseconds>(theta_end - theta_start).count() / 1e6;
+        a_theta_generation_ms += theta_ms;
 
-        if (ts.theta != current_theta) {
-            current_theta = ts.theta;
-            a_theta_count++;
-
-            auto theta_start = high_resolution_clock::now();
-            current_A_theta = system.generate_A_theta(ts.theta);
-            auto theta_end = high_resolution_clock::now();
-            double theta_ms = duration_cast<nanoseconds>(theta_end - theta_start).count() / 1e6;
-            a_theta_generation_ms += theta_ms;
-
-            if (stream_idx < 5 || stream_idx == total_streams - 1) {
-                cout << "Stream " << stream_idx << ": theta=" << ts.theta
-                     << ", tau=" << ts.tau << " (A_theta generated in "
-                     << theta_ms << " ms)" << endl;
-            }
+        if (theta < 5 || theta == n_theta - 1) {
+            cout << "Theta " << theta << " (A_theta generated in " << theta_ms << " ms)" << endl;
         }
 
         auto single_client_start = high_resolution_clock::now();
-        system.precompute_client(clients[0], current_A_theta, ts.tau);
+        system.precompute_client_batch(clients[0], A_theta);
         auto single_client_end = high_resolution_clock::now();
         single_client_precompute_ms +=
             duration_cast<nanoseconds>(single_client_end - single_client_start).count() / 1e6;
 
         for (size_t i = 1; i < n_clients; i++) {
-            system.precompute_client(clients[i], current_A_theta, ts.tau);
+            system.precompute_client_batch(clients[i], A_theta);
         }
 
+        omp_set_num_threads(0);
         auto server_loop_start = high_resolution_clock::now();
-        system.precompute_server(server, current_A_theta, ts.tau);
+        system.precompute_server_batch(server, A_theta);
         auto server_loop_end = high_resolution_clock::now();
+        omp_set_num_threads(1);
+
         server_precompute_ms +=
             duration_cast<nanoseconds>(server_loop_end - server_loop_start).count() / 1e6;
     }
+
+    // Trim precomputed values to exact size needed
+    for (auto& client : clients) {
+        client.precomputed_p.resize(total_streams);
+    }
+    server.precomputed_p_prime.resize(total_streams);
 
     auto precomp_total_end = high_resolution_clock::now();
     double precompute_total_ms =
         duration_cast<nanoseconds>(precomp_total_end - precomp_total_start).count() / 1e6;
 
-    cout << "\nA_theta generated " << a_theta_count << " times" << endl;
+    cout << "\nA_theta generated " << n_theta << " times" << endl;
     cout << "Server A_theta generation time (total): "
          << a_theta_generation_ms << " ms" << endl;
     cout << "Client precomputation time (per client): "

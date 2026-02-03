@@ -1,4 +1,4 @@
-// terse.cpp
+// terse.cpp - Add batch methods
 #include "terse.h"
 #include <random>
 #include <stdexcept>
@@ -189,6 +189,34 @@ void TERSESystem::precompute_server(TERSEServer& server,
     server.precomputed_p_prime.push_back(p_prime);
 }
 
+// NEW: Batch precomputation for client
+void TERSESystem::precompute_client_batch(TERSEClient& client, const DCRTPoly& A_theta) {
+    DCRTPoly product = A_theta * client.secret_key;
+    product.SetFormat(Format::COEFFICIENT);
+
+    const auto& first_tower = product.GetElementAtIndex(0);
+    const auto& values = first_tower.GetValues();
+
+    // Extract all N coefficients at once
+    for (size_t tau = 0; tau < values.GetLength(); tau++) {
+        client.precomputed_p.push_back(values[tau]);
+    }
+}
+
+// NEW: Batch precomputation for server
+void TERSESystem::precompute_server_batch(TERSEServer& server, const DCRTPoly& A_theta) {
+    DCRTPoly product = A_theta * server.server_key;
+    product.SetFormat(Format::COEFFICIENT);
+
+    const auto& first_tower = product.GetElementAtIndex(0);
+    const auto& values = first_tower.GetValues();
+
+    // Extract all N coefficients at once
+    for (size_t tau = 0; tau < values.GetLength(); tau++) {
+        server.precomputed_p_prime.push_back(values[tau]);
+    }
+}
+
 NativeInteger TERSESystem::encrypt(const TERSEClient& client, uint32_t plaintext,
                                    size_t timestamp_idx) {
     if (plaintext >= params.plain_modulus) {
@@ -203,7 +231,6 @@ NativeInteger TERSESystem::encrypt(const TERSEClient& client, uint32_t plaintext
 
     int64_t e_i = sample_gaussian_error();
 
-    // Combine: t*e_i + plaintext
     int64_t combined = static_cast<int64_t>(params.plain_modulus) * e_i + 
                        static_cast<int64_t>(plaintext);
 
@@ -318,7 +345,6 @@ void TERSESystem::save_ciphertext_matrix(const vector<vector<NativeInteger>>& ct
     out.write(reinterpret_cast<const char*>(&n_rows), sizeof(n_rows));
     out.write(reinterpret_cast<const char*>(&n_cols), sizeof(n_cols));
 
-    // Buffered writing - collect entire row before writing
     vector<uint64_t> buffer;
     buffer.reserve(n_cols);
 
@@ -341,7 +367,6 @@ vector<vector<NativeInteger>> TERSESystem::load_ciphertext_matrix(const string& 
 
     vector<vector<NativeInteger>> cts(n_rows, vector<NativeInteger>(n_cols));
 
-    // Buffered reading - read entire row at once
     vector<uint64_t> buffer(n_cols);
 
     for (size_t r = 0; r < n_rows; r++) {
@@ -376,7 +401,6 @@ void TERSESystem::save_aggregate_vector(const vector<NativeInteger>& result,
     size_t n = result.size();
     out.write(reinterpret_cast<const char*>(&n), sizeof(n));
 
-    // Buffered writing
     vector<uint64_t> buffer;
     buffer.reserve(n);
     for (const auto& val : result) {
@@ -392,7 +416,6 @@ vector<NativeInteger> TERSESystem::load_aggregate_vector(const string& filename)
     size_t n = 0;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
 
-    // Buffered reading
     vector<uint64_t> buffer(n);
     in.read(reinterpret_cast<char*>(buffer.data()), buffer.size() * sizeof(uint64_t));
 
@@ -414,7 +437,6 @@ void TERSESystem::save_client_keys(const vector<TERSEClient>& clients, const str
     out.write(reinterpret_cast<const char*>(&n_clients), sizeof(n_clients));
 
     for (const auto& client : clients) {
-        // Make a copy to set format
         DCRTPoly sk_copy = client.secret_key;
         sk_copy.SetFormat(Format::COEFFICIENT);
 

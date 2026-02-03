@@ -77,6 +77,10 @@ public:
     void precompute_client(TERSEClient& client, const DCRTPoly& A_theta, size_t tau);
     void precompute_server(TERSEServer& server, const DCRTPoly& A_theta, size_t tau);
 
+    // Batch precomputation methods
+    void precompute_client_batch(TERSEClient& client, const DCRTPoly& A_theta);
+    void precompute_server_batch(TERSEServer& server, const DCRTPoly& A_theta);
+
     NativeInteger encrypt(const TERSEClient& client, uint32_t plaintext, size_t timestamp_idx);
     uint64_t aggregate(const TERSEServer& server, const vector<NativeInteger>& ciphertexts,
                        size_t timestamp_idx);
