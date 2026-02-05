@@ -1,5 +1,6 @@
-// trusted.cpp - Correct implementation matching the paper
+// trusted.cpp
 #include "terse.h"
+#include "dp_mechanisms.h"
 #include <iostream>
 #include <fstream>
 #include <chrono>
@@ -36,12 +37,29 @@ AggregatedCiphertext load_aggregated_ciphertext_untrusted(size_t ts_idx) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        cerr << "Usage: " << argv[0] << " <n_timestamps>" << endl;
+    if (argc < 2 || argc > 5) {
+        cerr << "Usage: " << argv[0] << " <n_timestamps> [epsilon] [dp_mechanism] [delta]" << endl;
+        cerr << "  dp_mechanism: none (default), laplace, gaussian" << endl;
+        cerr << "  delta: required for gaussian mechanism (e.g., 1e-5)" << endl;
         return 1;
     }
 
     size_t n_timestamps = stoull(argv[1]);
+    double epsilon = (argc >= 3) ? stod(argv[2]) : 0.0;
+    string dp_mechanism = (argc >= 4) ? string(argv[3]) : "none";
+    double delta = (argc >= 5) ? stod(argv[4]) : 0.0;
+
+    bool enable_dp = (dp_mechanism != "none");
+
+    if (enable_dp && epsilon <= 0) {
+        cerr << "Error: epsilon must be positive when DP is enabled" << endl;
+        return 1;
+    }
+
+    if (dp_mechanism == "gaussian" && delta <= 0) {
+        cerr << "Error: delta must be positive for Gaussian mechanism" << endl;
+        return 1;
+    }
 
     TERSEParams params = TERSEParams::load("data/params.bin");
     TERSESystem system(params);
@@ -67,10 +85,23 @@ int main(int argc, char* argv[]) {
     uint64_t t = params.plain_modulus;
 
     cout << "=== TERSE Decryption ===" << endl;
+    if (enable_dp) {
+        cout << "Differential Privacy: ENABLED" << endl;
+        cout << "  Mechanism: " << dp_mechanism << endl;
+        cout << "  Epsilon: " << epsilon << endl;
+        if (dp_mechanism == "gaussian") {
+            cout << "  Delta: " << delta << endl;
+        }
+        cout << "  Sensitivity: " << (t - 1) << endl;
+        cout << "  Total privacy budget: " << (epsilon * n_timestamps) << endl;
+    } else {
+        cout << "Differential Privacy: DISABLED" << endl;
+    }
     cout << "Processing " << n_timestamps << " timestamps..." << endl;
 
     double total_untrusted_io_ms = 0;
     double total_trusted_decrypt_ms = 0;
+    double total_dp_noise_ms = 0;
     bool all_passed = true;
 
     for (size_t ts_idx = 0; ts_idx < n_timestamps; ts_idx++) {
@@ -82,7 +113,6 @@ int main(int argc, char* argv[]) {
         total_untrusted_io_ms += io_time_ms;
 
         // TRUSTED: Decrypt using enclave's p' material
-        // Dec(st_enc, ts, ŷ) := [[p'_θ[τ] + ŷ]_q]_t
         auto decrypt_start = high_resolution_clock::now();
 
         vector<uint32_t> decrypted_sum(vector_dim);
@@ -116,38 +146,88 @@ int main(int argc, char* argv[]) {
         double decrypt_time_ms = duration_cast<nanoseconds>(decrypt_end - decrypt_start).count() / 1e6;
         total_trusted_decrypt_ms += decrypt_time_ms;
 
-        // Verify
-        string sum_file = "data/expected_sum_" + to_string(ts_idx) + ".txt";
-        ifstream sum_in(sum_file);
-        if (!sum_in) {
-            throw runtime_error("Failed to open " + sum_file);
+        // TRUSTED: Apply differential privacy if enabled
+        vector<double> final_result;
+        if (enable_dp) {
+            auto dp_start = high_resolution_clock::now();
+
+            uint32_t sensitivity = t - 1;  // Maximum value per coordinate
+
+            if (dp_mechanism == "laplace") {
+                final_result = add_laplace_noise(decrypted_sum, epsilon, sensitivity);
+            } else if (dp_mechanism == "gaussian") {
+                final_result = add_gaussian_noise(decrypted_sum, epsilon, delta, sensitivity);
+            } else {
+                cerr << "Unknown DP mechanism: " << dp_mechanism << endl;
+                return 1;
+            }
+
+            auto dp_end = high_resolution_clock::now();
+            double dp_time_ms = duration_cast<nanoseconds>(dp_end - dp_start).count() / 1e6;
+            total_dp_noise_ms += dp_time_ms;
+
+            // Save noisy results
+            string noisy_file = "data/noisy_sum_" + to_string(ts_idx) + ".txt";
+            ofstream noisy_out(noisy_file);
+            for (size_t coord = 0; coord < vector_dim; coord++) {
+                noisy_out << final_result[coord];
+                if (coord + 1 < vector_dim) noisy_out << ' ';
+            }
+            noisy_out << endl;
+            noisy_out.close();
         }
 
-        for (size_t coord = 0; coord < vector_dim; coord++) {
-            uint64_t expected;
-            sum_in >> expected;
-            if (decrypted_sum[coord] != expected) {
-                cerr << "Timestamp " << ts_idx << " coord " << coord
-                     << " FAILED: Expected " << expected
-                     << ", Got " << decrypted_sum[coord] << endl;
-                all_passed = false;
+        // Verify (only if DP is disabled)
+        if (!enable_dp) {
+            string sum_file = "data/expected_sum_" + to_string(ts_idx) + ".txt";
+            ifstream sum_in(sum_file);
+            if (!sum_in) {
+                throw runtime_error("Failed to open " + sum_file);
             }
+
+            for (size_t coord = 0; coord < vector_dim; coord++) {
+                uint64_t expected;
+                sum_in >> expected;
+                if (decrypted_sum[coord] != expected) {
+                    cerr << "Timestamp " << ts_idx << " coord " << coord
+                         << " FAILED: Expected " << expected
+                         << ", Got " << decrypted_sum[coord] << endl;
+                    all_passed = false;
+                }
+            }
+            sum_in.close();
         }
-        sum_in.close();
     }
 
     cout << "\n=== Performance Results ===" << endl;
     cout << "Per-Timestamp Breakdown:" << endl;
     cout << "  Untrusted I/O (avg): " << (total_untrusted_io_ms / n_timestamps) << " ms" << endl;
     cout << "  Trusted decrypt (avg): " << (total_trusted_decrypt_ms / n_timestamps) << " ms" << endl;
-    cout << "  Total per timestamp: " << ((total_untrusted_io_ms + total_trusted_decrypt_ms) / n_timestamps) << " ms" << endl;
+    if (enable_dp) {
+        cout << "  DP noise addition (avg): " << (total_dp_noise_ms / n_timestamps) << " ms" << endl;
+    }
+    cout << "  Total per timestamp: " << ((total_untrusted_io_ms + total_trusted_decrypt_ms + total_dp_noise_ms) / n_timestamps) << " ms" << endl;
 
     cout << "\nTotal Times:" << endl;
     cout << "  Untrusted I/O: " << total_untrusted_io_ms << " ms" << endl;
     cout << "  Trusted decryption: " << total_trusted_decrypt_ms << " ms" << endl;
-    cout << "  Combined runtime: " << (total_untrusted_io_ms + total_trusted_decrypt_ms) << " ms" << endl;
+    if (enable_dp) {
+        cout << "  DP noise addition: " << total_dp_noise_ms << " ms" << endl;
+    }
+    cout << "  Combined runtime: " << (total_untrusted_io_ms + total_trusted_decrypt_ms + total_dp_noise_ms) << " ms" << endl;
 
-    cout << "\nVerification: " << (all_passed ? "ALL PASSED" : "SOME FAILED") << endl;
+    if (enable_dp) {
+        cout << "\nDifferential Privacy Summary:" << endl;
+        cout << "  Noisy results saved to data/noisy_sum_*.txt" << endl;
+        cout << "  Privacy guarantee: " << dp_mechanism << "-DP" << endl;
+        cout << "  Per-timestamp epsilon: " << epsilon << endl;
+        cout << "  Total privacy cost: " << (epsilon * n_timestamps) << endl;
+        if (dp_mechanism == "gaussian") {
+            cout << "  Delta: " << delta << endl;
+        }
+    } else {
+        cout << "\nVerification: " << (all_passed ? "ALL PASSED" : "SOME FAILED") << endl;
+    }
 
-    return all_passed ? 0 : 1;
+    return (enable_dp || all_passed) ? 0 : 1;
 }

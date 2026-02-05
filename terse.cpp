@@ -166,6 +166,74 @@ DCRTPoly TERSESystem::generate_A_theta(uint64_t theta) {
     return DCRTPoly(dug, element_params, Format::EVALUATION);
 }
 
+void TERSESystem::save_A_theta(const DCRTPoly& A_theta, const string& filename) const {
+    ofstream out(filename, ios::binary);
+    if (!out) {
+        throw runtime_error("Failed to open " + filename);
+    }
+
+    // Save in coefficient form for consistency
+    DCRTPoly A_copy = A_theta;
+    A_copy.SetFormat(Format::COEFFICIENT);
+
+    size_t num_towers = A_copy.GetNumOfElements();
+    out.write(reinterpret_cast<const char*>(&num_towers), sizeof(num_towers));
+
+    for (size_t i = 0; i < num_towers; i++) {
+        const auto& tower = A_copy.GetElementAtIndex(i);
+        const auto& values = tower.GetValues();
+        size_t n_values = values.GetLength();
+        out.write(reinterpret_cast<const char*>(&n_values), sizeof(n_values));
+
+        // Save modulus for verification
+        uint64_t modulus = tower.GetModulus().ConvertToInt();
+        out.write(reinterpret_cast<const char*>(&modulus), sizeof(modulus));
+
+        // Save coefficients
+        for (size_t j = 0; j < n_values; j++) {
+            uint64_t val = values[j].ConvertToInt();
+            out.write(reinterpret_cast<const char*>(&val), sizeof(val));
+        }
+    }
+    out.close();
+}
+
+DCRTPoly TERSESystem::load_A_theta(const string& filename) const {
+    ifstream in(filename, ios::binary);
+    if (!in) {
+        throw runtime_error("Failed to open " + filename);
+    }
+
+    size_t num_towers;
+    in.read(reinterpret_cast<char*>(&num_towers), sizeof(num_towers));
+
+    DCRTPoly A_theta(element_params, Format::COEFFICIENT, true);
+
+    for (size_t i = 0; i < num_towers; i++) {
+        size_t n_values;
+        in.read(reinterpret_cast<char*>(&n_values), sizeof(n_values));
+
+        uint64_t modulus;
+        in.read(reinterpret_cast<char*>(&modulus), sizeof(modulus));
+
+        NativeVector values(n_values, NativeInteger(modulus));
+        for (size_t j = 0; j < n_values; j++) {
+            uint64_t val;
+            in.read(reinterpret_cast<char*>(&val), sizeof(val));
+            values[j] = NativeInteger(val);
+        }
+
+        NativePoly tower(element_params->GetParams()[i], Format::COEFFICIENT, true);
+        tower.SetValues(values, Format::COEFFICIENT);
+        A_theta.SetElementAtIndex(i, tower);
+    }
+
+    in.close();
+    A_theta.SetFormat(Format::EVALUATION);
+    return A_theta;
+}
+
+
 void TERSESystem::precompute_client(TERSEClient& client, const DCRTPoly& A_theta, size_t tau) {
     DCRTPoly product = A_theta * client.secret_key;
 
