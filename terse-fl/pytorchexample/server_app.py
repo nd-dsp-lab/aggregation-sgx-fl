@@ -1,6 +1,7 @@
 """TERSE-FL Server App with secure aggregation."""
 
 import os
+import subprocess
 import numpy as np
 import torch
 from typing import List, Tuple, Dict, Optional
@@ -28,7 +29,7 @@ from pytorchexample.terse_utils import (
 
 
 class TERSEFedAvg(FedAvg):
-    """FedAvg strategy with TERSE secure aggregation."""
+    """FedAvg strategy with TERSE secure aggregation (decrypt in SGX)."""
 
     def __init__(
         self,
@@ -52,10 +53,28 @@ class TERSEFedAvg(FedAvg):
 
         terse_py = get_terse_module()
         params_file = str(DATA_DIR / "params.bin")
-        server_key_file = str(DATA_DIR / "server_key.bin")
-
         self.terse_server = terse_py.TERSEServer(params_file)
-        self.terse_trusted = terse_py.TERSETrusted(params_file, server_key_file)
+
+    def _run_sgx_decrypt_round(self, start_ts: int) -> None:
+        cmd = [
+            "gramine-sgx",
+            "sgx/trusted_round",
+            str(start_ts),
+            str(self.n_chunks),
+            str(self.vector_dim),
+        ]
+        subprocess.check_call(cmd, cwd=str(PROJECT_ROOT))
+
+    def _load_decrypted_chunk(self, timestamp: int) -> np.ndarray:
+        p = DATA_DIR / f"decrypted_{timestamp}.bin"
+        raw = p.read_bytes()
+        arr = np.frombuffer(raw, dtype=np.uint32, count=self.vector_dim)
+
+        if arr.size != self.vector_dim:
+            raise ValueError(
+                f"Bad decrypted size for ts={timestamp}: got {arr.size}, expected {self.vector_dim}"
+            )
+        return arr
 
     def aggregate_fit(
         self,
@@ -73,19 +92,30 @@ class TERSEFedAvg(FedAvg):
 
         aggregated_flat = np.zeros(self.padded_len, dtype=np.float32)
 
+        # Your existing timestamp mapping:
+        # timestamp = (server_round - 1) * n_chunks + chunk_idx
+        start_ts = (server_round - 1) * self.n_chunks
+
+        # 1) Aggregate and save encrypted aggregates for all chunks (untrusted)
         for chunk_idx in range(self.n_chunks):
-            # Ensure contiguous uint64 (avoid dtype/stride surprises)
             client_ciphertexts = [
                 np.ascontiguousarray(client_chunks[chunk_idx], dtype=np.uint64)
                 for client_chunks in all_client_chunks
             ]
 
-            timestamp = (server_round - 1) * self.n_chunks + chunk_idx
+            timestamp = start_ts + chunk_idx
 
             aggregate_ct = self.terse_server.aggregate_ciphertexts(client_ciphertexts, timestamp)
             self.terse_server.save_aggregate(aggregate_ct, timestamp)
 
-            decrypted = self.terse_trusted.decrypt_aggregate(timestamp, self.vector_dim)
+        # 2) One enclave launch per round (trusted)
+        self._run_sgx_decrypt_round(start_ts)
+
+        # 3) Load decrypted chunks and finish aggregation (untrusted post-processing)
+        for chunk_idx in range(self.n_chunks):
+            timestamp = start_ts + chunk_idx
+
+            decrypted = self._load_decrypted_chunk(timestamp)
 
             chunk_float = dequantize_parameters(
                 decrypted, self.scale_factor, self.plaintext_modulus

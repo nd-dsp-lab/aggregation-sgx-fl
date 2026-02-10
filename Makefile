@@ -21,7 +21,7 @@ PYTHON_TARGET = terse_py$(PYTHON_EXT_SUFFIX)
 
 # Object files
 TERSE_OBJECTS = $(SRC_DIR)/terse.o
-TARGETS = client server trusted setup_clients setup_trusted aes_client aes_trusted
+TARGETS = client server trusted trusted_round setup_clients setup_trusted aes_client aes_trusted
 PYTHON_TARGET = $(PYTHON_DIR)/terse_py$(PYTHON_EXT_SUFFIX)
 
 .PHONY: all sgx python clean cleanall help
@@ -50,6 +50,13 @@ trusted: $(TERSE_OBJECTS) $(SRC_DIR)/trusted.o
 
 $(SRC_DIR)/trusted.o: $(SRC_DIR)/trusted.cpp $(SRC_DIR)/terse.h $(SRC_DIR)/dp_mechanisms.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+trusted_round: $(TERSE_OBJECTS) $(SRC_DIR)/trusted_round.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS) $(LIBS)
+
+$(SRC_DIR)/trusted_round.o: $(SRC_DIR)/trusted_round.cpp $(SRC_DIR)/terse.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
 
 setup_clients: $(TERSE_OBJECTS) $(SRC_DIR)/setup_clients.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS) $(LIBS)
@@ -84,7 +91,7 @@ $(PYTHON_TARGET): $(PYTHON_DIR)/terse_python.cpp $(TERSE_OBJECTS)
 		$< $(TERSE_OBJECTS) -o $@ $(LDFLAGS) $(LIBS)
 
 # SGX targets
-sgx: $(SGX_DIR)/trusted.manifest.sgx $(SGX_DIR)/aes_trusted.manifest.sgx $(SGX_DIR)/setup_trusted.manifest.sgx
+sgx: $(SGX_DIR)/trusted.manifest.sgx $(SGX_DIR)/trusted_round.manifest.sgx $(SGX_DIR)/aes_trusted.manifest.sgx $(SGX_DIR)/setup_trusted.manifest.sgx
 
 $(SGX_DIR)/trusted.manifest: $(SGX_DIR)/trusted.manifest.template trusted
 	gramine-manifest -Dlog_level=error -Darch_libdir=/lib/x86_64-linux-gnu \
@@ -105,6 +112,13 @@ $(SGX_DIR)/setup_trusted.manifest: $(SGX_DIR)/setup_trusted.manifest.template se
 		-Dexecdir=$(shell pwd) $< $@
 
 $(SGX_DIR)/setup_trusted.manifest.sgx: $(SGX_DIR)/setup_trusted.manifest setup_trusted
+	gramine-sgx-sign --manifest $< --output $@
+
+$(SGX_DIR)/trusted_round.manifest: $(SGX_DIR)/trusted_round.manifest.template trusted_round
+	gramine-manifest -Dlog_level=error -Darch_libdir=/lib/x86_64-linux-gnu \
+		-Dexecdir=$(shell pwd) $< $@
+
+$(SGX_DIR)/trusted_round.manifest.sgx: $(SGX_DIR)/trusted_round.manifest trusted_round
 	gramine-sgx-sign --manifest $< --output $@
 
 # Clean targets

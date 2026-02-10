@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
-libos.entrypoint = "/setup_trusted"
+libos.entrypoint = "/trusted_round"
 
 loader.log_level = "{{ log_level }}"
 
@@ -13,7 +13,7 @@ fs.mounts = [
   { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
   { path = "/usr/lib", uri = "file:/usr/lib" },
   { path = "/usr/local/lib", uri = "file:/usr/local/lib" },
-  { path = "/setup_trusted", uri = "file:{{ execdir }}/setup_trusted" },
+  { path = "/trusted_round", uri = "file:{{ execdir }}/trusted_round" },
   { path = "/data", uri = "file:{{ execdir }}/data" },
 ]
 
@@ -28,7 +28,7 @@ sgx.trusted_files = [
   "file:{{ arch_libdir }}/",
   "file:/usr/lib/",
   "file:/usr/local/lib/",
-  "file:{{ execdir }}/setup_trusted",
+  "file:{{ execdir }}/trusted_round",
 ]
 
 sgx.allowed_files = [
