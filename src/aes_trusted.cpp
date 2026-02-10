@@ -1,4 +1,4 @@
-// aes_trusted.cpp - Realistic: keys already in memory
+// aes_trusted.cpp 
 #include <iostream>
 #include <vector>
 #include <fstream>
@@ -6,17 +6,16 @@
 #include <cstring>
 #include <unordered_map>
 #include <openssl/evp.h>
+#include "dp_mechanisms.h"
 
 using namespace std;
 using namespace std::chrono;
 
-// Structure to hold ciphertext data
 struct CiphertextData {
     size_t client_idx;
     vector<uint8_t> ciphertext;
 };
 
-// UNTRUSTED: Load all ciphertexts for a timestamp (outside enclave)
 vector<CiphertextData> load_ciphertexts_untrusted(size_t ts_idx, size_t n_clients) {
     vector<CiphertextData> ciphertexts;
     ciphertexts.reserve(n_clients);
@@ -42,7 +41,6 @@ vector<CiphertextData> load_ciphertexts_untrusted(size_t ts_idx, size_t n_client
     return ciphertexts;
 }
 
-// TRUSTED: Decrypt (inside enclave)
 vector<uint64_t> aes_decrypt(const vector<uint8_t>& ciphertext, 
                              const vector<uint8_t>& key, 
                              size_t vector_dim) {
@@ -89,12 +87,29 @@ vector<uint64_t> aes_decrypt(const vector<uint8_t>& ciphertext,
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        cerr << "Usage: " << argv[0] << " <n_timestamps>" << endl;
+    if (argc < 2 || argc > 5) {
+        cerr << "Usage: " << argv[0] << " <n_timestamps> [epsilon] [dp_mechanism] [delta]" << endl;
+        cerr << "  dp_mechanism: none (default), laplace, gaussian" << endl;
+        cerr << "  delta: required for gaussian mechanism (e.g., 1e-5)" << endl;
         return 1;
     }
 
     size_t n_timestamps = stoull(argv[1]);
+    double epsilon = (argc >= 3) ? stod(argv[2]) : 0.0;
+    string dp_mechanism = (argc >= 4) ? string(argv[3]) : "none";
+    double delta = (argc >= 5) ? stod(argv[4]) : 0.0;
+
+    bool enable_dp = (dp_mechanism != "none");
+
+    if (enable_dp && epsilon <= 0) {
+        cerr << "Error: epsilon must be positive when DP is enabled" << endl;
+        return 1;
+    }
+
+    if (dp_mechanism == "gaussian" && delta <= 0) {
+        cerr << "Error: delta must be positive for Gaussian mechanism" << endl;
+        return 1;
+    }
 
     ifstream meta("data/aes_metadata.txt");
     if (!meta) throw runtime_error("Failed to open metadata file");
@@ -107,11 +122,21 @@ int main(int argc, char* argv[]) {
         throw runtime_error("Timestamp count mismatch");
     }
 
-    // ========================================
-    // ONE-TIME SETUP: Load keys into memory
-    // (In production: provisioned via secure channel after attestation)
-    // ========================================
-    cout << "=== One-Time Setup: Key Provisioning ===" << endl;
+    cout << "=== AES Decryption ===" << endl;
+    if (enable_dp) {
+        cout << "Differential Privacy: ENABLED" << endl;
+        cout << "  Mechanism: " << dp_mechanism << endl;
+        cout << "  Epsilon: " << epsilon << endl;
+        if (dp_mechanism == "gaussian") {
+            cout << "  Delta: " << delta << endl;
+        }
+        cout << "  Sensitivity: 65536" << endl;
+        cout << "  Total privacy budget: " << (epsilon * n_timestamps) << endl;
+    } else {
+        cout << "Differential Privacy: DISABLED" << endl;
+    }
+
+    cout << "\n=== One-Time Setup: Key Provisioning ===" << endl;
     cout << "Loading " << n_clients << " client keys into memory..." << endl;
 
     auto key_provision_start = high_resolution_clock::now();
@@ -138,31 +163,28 @@ int main(int argc, char* argv[]) {
     cout << "Key provisioning time (one-time): " << key_provision_ms << " ms" << endl;
     cout << "Average per key: " << (key_provision_ms / n_clients) << " ms" << endl;
 
-    // ========================================
-    // RUNTIME: Decryption and Aggregation
-    // ========================================
     cout << "\n=== Runtime: Decryption and Aggregation ===" << endl;
     cout << "Processing " << n_timestamps << " timestamps..." << endl;
 
     double total_untrusted_io_ms = 0;
     double total_trusted_decrypt_aggregate_ms = 0;
+    double total_dp_noise_ms = 0;
     bool all_passed = true;
 
     for (size_t ts_idx = 0; ts_idx < n_timestamps; ts_idx++) {
-        // UNTRUSTED: Load ciphertexts (outside enclave)
+        // UNTRUSTED: Load ciphertexts
         auto io_start = high_resolution_clock::now();
         vector<CiphertextData> ciphertexts = load_ciphertexts_untrusted(ts_idx, n_clients);
         auto io_end = high_resolution_clock::now();
         double io_time_ms = duration_cast<nanoseconds>(io_end - io_start).count() / 1e6;
         total_untrusted_io_ms += io_time_ms;
 
-        // TRUSTED: Decrypt and aggregate (inside enclave, using keys from memory)
+        // TRUSTED: Decrypt and aggregate
         auto trusted_start = high_resolution_clock::now();
 
         vector<uint64_t> aggregate(vector_dim, 0);
 
         for (const auto& ct_data : ciphertexts) {
-            // Keys already in memory - no I/O overhead
             vector<uint64_t> plaintext = aes_decrypt(ct_data.ciphertext, 
                                                      key_table[ct_data.client_idx], 
                                                      vector_dim);
@@ -176,44 +198,97 @@ int main(int argc, char* argv[]) {
         double trusted_time_ms = duration_cast<nanoseconds>(trusted_end - trusted_start).count() / 1e6;
         total_trusted_decrypt_aggregate_ms += trusted_time_ms;
 
-        // Verify
-        string sum_file = "data/aes_expected_sum_" + to_string(ts_idx) + ".txt";
-        ifstream sum_in(sum_file);
-        if (!sum_in) throw runtime_error("Failed to open " + sum_file);
+        // TRUSTED: Apply differential privacy if enabled
+        vector<double> final_result;
+        if (enable_dp) {
+            auto dp_start = high_resolution_clock::now();
 
-        for (size_t i = 0; i < vector_dim; i++) {
-            uint64_t expected;
-            sum_in >> expected;
-            if (aggregate[i] != expected) {
-                cerr << "Timestamp " << ts_idx << " coord " << i 
-                     << " FAILED: Expected " << expected 
-                     << ", Got " << aggregate[i] << endl;
-                all_passed = false;
+            // Convert to uint32_t for DP functions
+            vector<uint32_t> aggregate_u32(vector_dim);
+            for (size_t i = 0; i < vector_dim; i++) {
+                aggregate_u32[i] = static_cast<uint32_t>(aggregate[i] & 0xFFFFFFFF);
             }
+
+            uint32_t sensitivity = 65536;  // Maximum value per coordinate in AES
+
+            if (dp_mechanism == "laplace") {
+                final_result = add_laplace_noise(aggregate_u32, epsilon, sensitivity);
+            } else if (dp_mechanism == "gaussian") {
+                final_result = add_gaussian_noise(aggregate_u32, epsilon, delta, sensitivity);
+            } else {
+                cerr << "Unknown DP mechanism: " << dp_mechanism << endl;
+                return 1;
+            }
+
+            auto dp_end = high_resolution_clock::now();
+            double dp_time_ms = duration_cast<nanoseconds>(dp_end - dp_start).count() / 1e6;
+            total_dp_noise_ms += dp_time_ms;
+
+            // Save noisy results
+            string noisy_file = "data/aes_noisy_sum_" + to_string(ts_idx) + ".txt";
+            ofstream noisy_out(noisy_file);
+            for (size_t i = 0; i < vector_dim; i++) {
+                noisy_out << final_result[i];
+                if (i + 1 < vector_dim) noisy_out << ' ';
+            }
+            noisy_out << endl;
+            noisy_out.close();
         }
-        sum_in.close();
+
+        // Verify (only if DP is disabled)
+        if (!enable_dp) {
+            string sum_file = "data/aes_expected_sum_" + to_string(ts_idx) + ".txt";
+            ifstream sum_in(sum_file);
+            if (!sum_in) throw runtime_error("Failed to open " + sum_file);
+
+            for (size_t i = 0; i < vector_dim; i++) {
+                uint64_t expected;
+                sum_in >> expected;
+                if (aggregate[i] != expected) {
+                    cerr << "Timestamp " << ts_idx << " coord " << i 
+                         << " FAILED: Expected " << expected 
+                         << ", Got " << aggregate[i] << endl;
+                    all_passed = false;
+                }
+            }
+            sum_in.close();
+        }
     }
 
-    // ========================================
-    // Results
-    // ========================================
     cout << "\n=== Performance Results ===" << endl;
     cout << "One-time key provisioning: " << key_provision_ms << " ms" << endl;
     cout << "\nPer-Timestamp Breakdown:" << endl;
     cout << "  Untrusted I/O (avg): " << (total_untrusted_io_ms / n_timestamps) << " ms" << endl;
     cout << "  Trusted decrypt+aggregate (avg): " << (total_trusted_decrypt_aggregate_ms / n_timestamps) << " ms" << endl;
-    cout << "  Total per timestamp: " << ((total_untrusted_io_ms + total_trusted_decrypt_aggregate_ms) / n_timestamps) << " ms" << endl;
+    if (enable_dp) {
+        cout << "  DP noise addition (avg): " << (total_dp_noise_ms / n_timestamps) << " ms" << endl;
+    }
+    cout << "  Total per timestamp: " << ((total_untrusted_io_ms + total_trusted_decrypt_aggregate_ms + total_dp_noise_ms) / n_timestamps) << " ms" << endl;
 
     cout << "\nTotal Times:" << endl;
     cout << "  Untrusted I/O: " << total_untrusted_io_ms << " ms" << endl;
     cout << "  Trusted operations: " << total_trusted_decrypt_aggregate_ms << " ms" << endl;
-    cout << "  Combined runtime: " << (total_untrusted_io_ms + total_trusted_decrypt_aggregate_ms) << " ms" << endl;
+    if (enable_dp) {
+        cout << "  DP noise addition: " << total_dp_noise_ms << " ms" << endl;
+    }
+    cout << "  Combined runtime: " << (total_untrusted_io_ms + total_trusted_decrypt_aggregate_ms + total_dp_noise_ms) << " ms" << endl;
 
     cout << "\nAmortized (including setup): " 
-         << ((key_provision_ms + total_untrusted_io_ms + total_trusted_decrypt_aggregate_ms) / n_timestamps) 
+         << ((key_provision_ms + total_untrusted_io_ms + total_trusted_decrypt_aggregate_ms + total_dp_noise_ms) / n_timestamps) 
          << " ms per timestamp" << endl;
 
-    cout << "\nVerification: " << (all_passed ? "ALL PASSED" : "SOME FAILED") << endl;
+    if (enable_dp) {
+        cout << "\nDifferential Privacy Summary:" << endl;
+        cout << "  Noisy results saved to data/aes_noisy_sum_*.txt" << endl;
+        cout << "  Privacy guarantee: " << dp_mechanism << "-DP" << endl;
+        cout << "  Per-timestamp epsilon: " << epsilon << endl;
+        cout << "  Total privacy cost: " << (epsilon * n_timestamps) << endl;
+        if (dp_mechanism == "gaussian") {
+            cout << "  Delta: " << delta << endl;
+        }
+    } else {
+        cout << "\nVerification: " << (all_passed ? "ALL PASSED" : "SOME FAILED") << endl;
+    }
 
-    return all_passed ? 0 : 1;
+    return (enable_dp || all_passed) ? 0 : 1;
 }

@@ -1,0 +1,142 @@
+[92mINFO [0m:      Starting Flower ServerApp, config: num_rounds=5, no round_timeout
+[92mINFO [0m:      
+[92mINFO [0m:      [INIT]
+[92mINFO [0m:      Using initial global parameters provided by strategy
+[92mINFO [0m:      Starting evaluation of initial global parameters
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+/home/mbrody/fl_env/lib/python3.12/site-packages/ray/_private/worker.py:2051: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+[92mINFO [0m:      Starting Flower ServerApp, config: num_rounds=5, no round_timeout
+[92mINFO [0m:      
+[92mINFO [0m:      [INIT]
+[92mINFO [0m:      Using initial global parameters provided by strategy
+[92mINFO [0m:      Starting evaluation of initial global parameters
+/home/mbrody/fl_env/lib/python3.12/site-packages/ray/_private/worker.py:2051: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+[92mINFO [0m:      initial parameters (loss, other metrics): 2.3034569372104694, {'accuracy': 0.1}
+[92mINFO [0m:      
+[92mINFO [0m:      [ROUND 1]
+[92mINFO [0m:      configure_fit: strategy sampled 100 clients (out of 100)
+[36m(ClientAppActor pid=1499807)[0m Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[92mINFO [0m:      aggregate_fit: received 100 results and 0 failures
+Gramine is starting. Parsing TOML manifest file, this may take some time...
+[36m(pid=gcs_server)[0m [2026-02-09 20:39:58,808 E 1496573 1496573] (gcs_server) gcs_server.cc:302: Failed to establish connection to the event+metrics exporter agent. Events and metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+[36m(ClientAppActor pid=1499816)[0m Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.[32m [repeated 7x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)[0m
+[33m(raylet)[0m [2026-02-09 20:39:59,977 E 1496771 1496771] (raylet) main.cc:975: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+[2026-02-09 20:40:00,978 E 1496410 1496870] core_worker_process.cc:825: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+[36m(ClientAppActor pid=1499797)[0m [2026-02-09 20:40:01,612 E 1499797 1500057] core_worker_process.cc:825: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+-----------------------------------------------------------------------------------------------------------------------
+Gramine detected the following insecure configurations:
+
+  - loader.insecure__use_cmdline_argv = true   (forwarding command-line args from untrusted host to the app)
+  - sgx.allowed_files = [ ... ]                (some files are passed through from untrusted host without verification)
+
+Gramine will continue application execution, but this configuration must not be used in production!
+-----------------------------------------------------------------------------------------------------------------------
+
+[92mINFO [0m:      fit progress: (1, 2.3024908047688157, {'accuracy': 0.1}, 58.3161702780053)
+[92mINFO [0m:      configure_evaluate: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_evaluate: received 100 results and 0 failures
+[93mWARNING [0m:   No evaluate_metrics_aggregation_fn provided
+[92mINFO [0m:      
+[92mINFO [0m:      [ROUND 2]
+[92mINFO [0m:      configure_fit: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_fit: received 100 results and 0 failures
+Gramine is starting. Parsing TOML manifest file, this may take some time...
+-----------------------------------------------------------------------------------------------------------------------
+Gramine detected the following insecure configurations:
+
+  - loader.insecure__use_cmdline_argv = true   (forwarding command-line args from untrusted host to the app)
+  - sgx.allowed_files = [ ... ]                (some files are passed through from untrusted host without verification)
+
+Gramine will continue application execution, but this configuration must not be used in production!
+-----------------------------------------------------------------------------------------------------------------------
+
+[92mINFO [0m:      fit progress: (2, 2.301134999794296, {'accuracy': 0.1}, 115.10555671341717)
+[92mINFO [0m:      configure_evaluate: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_evaluate: received 100 results and 0 failures
+[92mINFO [0m:      
+[92mINFO [0m:      [ROUND 3]
+[92mINFO [0m:      configure_fit: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_fit: received 100 results and 0 failures
+Gramine is starting. Parsing TOML manifest file, this may take some time...
+-----------------------------------------------------------------------------------------------------------------------
+Gramine detected the following insecure configurations:
+
+  - loader.insecure__use_cmdline_argv = true   (forwarding command-line args from untrusted host to the app)
+  - sgx.allowed_files = [ ... ]                (some files are passed through from untrusted host without verification)
+
+Gramine will continue application execution, but this configuration must not be used in production!
+-----------------------------------------------------------------------------------------------------------------------
+
+[92mINFO [0m:      fit progress: (3, 2.3002413496186462, {'accuracy': 0.1001}, 171.92670042067766)
+[92mINFO [0m:      configure_evaluate: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_evaluate: received 100 results and 0 failures
+[92mINFO [0m:      
+[92mINFO [0m:      [ROUND 4]
+[92mINFO [0m:      configure_fit: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_fit: received 100 results and 0 failures
+Gramine is starting. Parsing TOML manifest file, this may take some time...
+-----------------------------------------------------------------------------------------------------------------------
+Gramine detected the following insecure configurations:
+
+  - loader.insecure__use_cmdline_argv = true   (forwarding command-line args from untrusted host to the app)
+  - sgx.allowed_files = [ ... ]                (some files are passed through from untrusted host without verification)
+
+Gramine will continue application execution, but this configuration must not be used in production!
+-----------------------------------------------------------------------------------------------------------------------
+
+[92mINFO [0m:      fit progress: (4, 2.2989702888681918, {'accuracy': 0.106}, 228.545277453959)
+[92mINFO [0m:      configure_evaluate: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_evaluate: received 100 results and 0 failures
+[92mINFO [0m:      
+[92mINFO [0m:      [ROUND 5]
+[92mINFO [0m:      configure_fit: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_fit: received 100 results and 0 failures
+Gramine is starting. Parsing TOML manifest file, this may take some time...
+-----------------------------------------------------------------------------------------------------------------------
+Gramine detected the following insecure configurations:
+
+  - loader.insecure__use_cmdline_argv = true   (forwarding command-line args from untrusted host to the app)
+  - sgx.allowed_files = [ ... ]                (some files are passed through from untrusted host without verification)
+
+Gramine will continue application execution, but this configuration must not be used in production!
+-----------------------------------------------------------------------------------------------------------------------
+
+[92mINFO [0m:      fit progress: (5, 2.2977455054657367, {'accuracy': 0.1205}, 286.1816846448928)
+[92mINFO [0m:      configure_evaluate: strategy sampled 100 clients (out of 100)
+[92mINFO [0m:      aggregate_evaluate: received 100 results and 0 failures
+[92mINFO [0m:      
+[92mINFO [0m:      [SUMMARY]
+[92mINFO [0m:      Run finished 5 round(s) in 287.01s
+[92mINFO [0m:      	History (loss, distributed):
+[92mINFO [0m:      		round 1: 2.301815218925476
+[92mINFO [0m:      		round 2: 2.3005048447847365
+[92mINFO [0m:      		round 3: 2.2996694433689115
+[92mINFO [0m:      		round 4: 2.298420875072479
+[92mINFO [0m:      		round 5: 2.2972266101837158
+[92mINFO [0m:      	History (loss, centralized):
+[92mINFO [0m:      		round 0: 2.3034569372104694
+[92mINFO [0m:      		round 1: 2.3024908047688157
+[92mINFO [0m:      		round 2: 2.301134999794296
+[92mINFO [0m:      		round 3: 2.3002413496186462
+[92mINFO [0m:      		round 4: 2.2989702888681918
+[92mINFO [0m:      		round 5: 2.2977455054657367
+[92mINFO [0m:      	History (metrics, centralized):
+[92mINFO [0m:      	{'accuracy': [(0, 0.1),
+[92mINFO [0m:      	              (1, 0.1),
+[92mINFO [0m:      	              (2, 0.1),
+[92mINFO [0m:      	              (3, 0.1001),
+[92mINFO [0m:      	              (4, 0.106),
+[92mINFO [0m:      	              (5, 0.1205)]}
+[92mINFO [0m:      
+[36m(ClientAppActor pid=1499819)[0m [2026-02-09 20:40:01,990 E 1499819 1501815] core_worker_process.cc:825: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14[32m [repeated 23x across cluster][0m
+[TERSE Server] Model has 62006 parameters
+[TERSE Server] Using 16 chunks per round, 80 total timestamps
+[TERSE] Setup already complete for 100 clients, 80 timestamps, vector_dim=4096
+[Round 0] Accuracy: 0.1000, Loss: 2.3035
+[Round 1] Accuracy: 0.1000, Loss: 2.3025
+[Round 2] Accuracy: 0.1000, Loss: 2.3011
+[Round 3] Accuracy: 0.1001, Loss: 2.3002
+[Round 4] Accuracy: 0.1060, Loss: 2.2990
+[Round 5] Accuracy: 0.1205, Loss: 2.2977
