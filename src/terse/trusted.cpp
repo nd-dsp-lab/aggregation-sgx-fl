@@ -1,12 +1,139 @@
-// trusted.cpp
+// trusted.cpp (CSV timings added)
+//
+// Writes buffered CSV timing events to: data/results/timings.trusted.csv
+//
+// CSV columns (same schema as other tools):
+//   unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us
+//
+// Optional env vars:
+// - TERSE_LOG_PER_TIMESTAMP=1  -> emit per-timestamp events (I/O, decrypt, DP, verify)
+
 #include "terse/terse.h"
 #include "common/dp_mechanisms.h"
+
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <filesystem>
+#include <sstream>
+#include <mutex>
+#include <vector>
+#include <cstdlib>
+#include <ctime>
 
 using namespace std;
-using namespace std::chrono;
+
+// ---------------------- CSV timing utilities ----------------------
+
+static uint64_t unix_time_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+class CsvTimings {
+public:
+    explicit CsvTimings(string path) : path_(std::move(path)) {}
+
+    void log_event(uint64_t unix_ns,
+                   const string& component,
+                   const string& phase,
+                   int64_t client_idx,
+                   int64_t ts,
+                   int64_t vector_dim,
+                   int64_t n_clients,
+                   int64_t n_timestamps,
+                   uint64_t duration_us) {
+        ostringstream oss;
+        oss << unix_ns << ","
+            << component << ","
+            << phase << ","
+            << client_idx << ","
+            << ts << ","
+            << vector_dim << ","
+            << n_clients << ","
+            << n_timestamps << ","
+            << duration_us
+            << "\n";
+
+        lock_guard<mutex> lk(mu_);
+        buf_.push_back(oss.str());
+    }
+
+    void flush() {
+        lock_guard<mutex> lk(mu_);
+
+        filesystem::create_directories(filesystem::path(path_).parent_path());
+
+        const bool need_header = !file_exists_nonempty_();
+        ofstream out(path_, ios::app);
+        if (!out) throw runtime_error("Failed to open timings file: " + path_);
+
+        if (need_header) {
+            out << "unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us\n";
+        }
+        for (const auto& line : buf_) out << line;
+        buf_.clear();
+    }
+
+    ~CsvTimings() {
+        try { flush(); } catch (...) {}
+    }
+
+private:
+    bool file_exists_nonempty_() const {
+        ifstream in(path_, ios::binary);
+        return in.good() && in.peek() != ifstream::traits_type::eof();
+    }
+
+    string path_;
+    mutex mu_;
+    vector<string> buf_;
+};
+
+class ScopeTimer {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    ScopeTimer(CsvTimings& timings,
+               string component,
+               string phase,
+               int64_t client_idx,
+               int64_t ts,
+               int64_t vector_dim,
+               int64_t n_clients,
+               int64_t n_timestamps)
+        : timings_(timings),
+          component_(std::move(component)),
+          phase_(std::move(phase)),
+          client_idx_(client_idx),
+          ts_(ts),
+          vector_dim_(vector_dim),
+          n_clients_(n_clients),
+          n_timestamps_(n_timestamps),
+          unix_ns_(unix_time_ns()),
+          start_(Clock::now()) {}
+
+    ~ScopeTimer() {
+        auto end = Clock::now();
+        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
+        timings_.log_event(unix_ns_, component_, phase_, client_idx_, ts_, vector_dim_, n_clients_, n_timestamps_, us);
+    }
+
+private:
+    CsvTimings& timings_;
+    string component_;
+    string phase_;
+    int64_t client_idx_;
+    int64_t ts_;
+    int64_t vector_dim_;
+    int64_t n_clients_;
+    int64_t n_timestamps_;
+    uint64_t unix_ns_;
+    Clock::time_point start_;
+};
+
+// ---------------------- app code ----------------------
 
 struct AggregatedCiphertext {
     vector<NativeInteger> ciphertext;
@@ -36,6 +163,14 @@ AggregatedCiphertext load_aggregated_ciphertext_untrusted(size_t ts_idx) {
     return agg_ct;
 }
 
+static size_t load_size_from_file(const string& filename) {
+    ifstream in(filename);
+    if (!in) throw runtime_error("Failed to open " + filename);
+    size_t v = 0;
+    in >> v;
+    return v;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2 || argc > 5) {
         cerr << "Usage: " << argv[0] << " <n_timestamps> [epsilon] [dp_mechanism] [delta]" << endl;
@@ -43,6 +178,9 @@ int main(int argc, char* argv[]) {
         cerr << "  delta: required for gaussian mechanism (e.g., 1e-5)" << endl;
         return 1;
     }
+
+    CsvTimings timings("data/results/timings.trusted.csv");
+    const bool log_per_timestamp = (std::getenv("TERSE_LOG_PER_TIMESTAMP") != nullptr);
 
     size_t n_timestamps = stoull(argv[1]);
     double epsilon = (argc >= 3) ? stod(argv[2]) : 0.0;
@@ -61,172 +199,184 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    TERSEParams params = TERSEParams::load("data/params.bin");
-    TERSESystem system(params);
-    TERSEServer server = system.load_server_key("data/server_key.bin");
+    // Load metadata (for CSV context fields)
+    int64_t n_clients_meta = -1;
+    size_t saved_n_timestamps = 0;
+    size_t vector_dim = 0;
 
-    ifstream n_ts_file("data/n_timestamps.txt");
-    size_t saved_n_timestamps;
-    n_ts_file >> saved_n_timestamps;
-    n_ts_file.close();
+    {
+        ScopeTimer t(timings, "trusted", "load_metadata",
+                     -1, -1, -1, -1, (int64_t)n_timestamps);
+
+        // Optional n_clients for context (best-effort)
+        try { n_clients_meta = (int64_t)load_size_from_file("data/n_clients.txt"); } catch (...) {}
+
+        saved_n_timestamps = load_size_from_file("data/n_timestamps.txt");
+        vector_dim = load_size_from_file("data/vector_dim.txt");
+    }
 
     if (saved_n_timestamps != n_timestamps) {
         throw runtime_error("Timestamp count mismatch");
     }
 
-    ifstream vd_file("data/vector_dim.txt");
-    size_t vector_dim;
-    vd_file >> vector_dim;
-    vd_file.close();
+    TERSEParams params = TERSEParams::load("data/params.bin");
+    TERSESystem system(params);
+
+    TERSEServer server;
+    {
+        ScopeTimer t(timings, "trusted", "load_server_key",
+                     -1, -1, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps);
+        server = system.load_server_key("data/server_key.bin");
+    }
 
     NativeInteger q_mod = system.get_context()->GetCryptoParameters()
                           ->GetElementParams()->GetParams()[0]->GetModulus();
     uint64_t q_val = q_mod.ConvertToInt();
-    uint64_t t = params.plain_modulus;
+    uint64_t t_plain = params.plain_modulus;
 
-    cout << "=== TERSE Decryption ===" << endl;
+    cout << "=== TERSE Decryption (CSV timings -> data/results/timings.trusted.csv) ===" << endl;
+    cout << "DP: " << (enable_dp ? "ENABLED" : "DISABLED") << endl;
     if (enable_dp) {
-        cout << "Differential Privacy: ENABLED" << endl;
         cout << "  Mechanism: " << dp_mechanism << endl;
         cout << "  Epsilon: " << epsilon << endl;
-        if (dp_mechanism == "gaussian") {
-            cout << "  Delta: " << delta << endl;
-        }
-        cout << "  Sensitivity: " << (t - 1) << endl;
-        cout << "  Total privacy budget: " << (epsilon * n_timestamps) << endl;
-    } else {
-        cout << "Differential Privacy: DISABLED" << endl;
+        if (dp_mechanism == "gaussian") cout << "  Delta: " << delta << endl;
     }
     cout << "Processing " << n_timestamps << " timestamps..." << endl;
 
-    double total_untrusted_io_ms = 0;
-    double total_trusted_decrypt_ms = 0;
-    double total_dp_noise_ms = 0;
     bool all_passed = true;
 
-    for (size_t ts_idx = 0; ts_idx < n_timestamps; ts_idx++) {
-        // UNTRUSTED: Load aggregated ciphertext (ŷ from server)
-        auto io_start = high_resolution_clock::now();
-        AggregatedCiphertext agg_ct = load_aggregated_ciphertext_untrusted(ts_idx);
-        auto io_end = high_resolution_clock::now();
-        double io_time_ms = duration_cast<nanoseconds>(io_end - io_start).count() / 1e6;
-        total_untrusted_io_ms += io_time_ms;
+    {
+        ScopeTimer t_total(timings, "trusted", "decrypt_total",
+                           -1, -1, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps);
 
-        // TRUSTED: Decrypt using enclave's p' material
-        auto decrypt_start = high_resolution_clock::now();
-
-        vector<uint32_t> decrypted_sum(vector_dim);
-        for (size_t coord = 0; coord < vector_dim; coord++) {
-            size_t stream_idx = ts_idx * vector_dim + coord;
-
-            // Add p'[stream_idx] to the aggregated ciphertext ŷ
-            NativeInteger sum = agg_ct.ciphertext[coord].ModAdd(
-                server.precomputed_p_prime[stream_idx], q_mod);
-
-            uint64_t raw = sum.ConvertToInt();
-
-            // Center around zero for signed reduction
-            int64_t signed_val;
-            if (raw > q_val / 2) {
-                signed_val = static_cast<int64_t>(raw) - static_cast<int64_t>(q_val);
-            } else {
-                signed_val = static_cast<int64_t>(raw);
+        for (size_t ts_idx = 0; ts_idx < n_timestamps; ts_idx++) {
+            std::unique_ptr<ScopeTimer> t_ts_total;
+            if (log_per_timestamp) {
+                t_ts_total = std::make_unique<ScopeTimer>(
+                    timings, "trusted", "timestamp_total",
+                    -1, (int64_t)ts_idx, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps
+                );
             }
 
-            // Reduce mod t
-            int64_t result = signed_val % static_cast<int64_t>(t);
-            if (result < 0) {
-                result += static_cast<int64_t>(t);
+            AggregatedCiphertext agg_ct;
+            {
+                std::unique_ptr<ScopeTimer> t_io;
+                if (log_per_timestamp) {
+                    t_io = std::make_unique<ScopeTimer>(
+                        timings, "trusted", "untrusted_io_load_aggregate",
+                        -1, (int64_t)ts_idx, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps
+                    );
+                }
+                agg_ct = load_aggregated_ciphertext_untrusted(ts_idx);
             }
 
-            decrypted_sum[coord] = static_cast<uint32_t>(result);
-        }
+            vector<uint32_t> decrypted_sum(vector_dim);
+            {
+                std::unique_ptr<ScopeTimer> t_dec;
+                if (log_per_timestamp) {
+                    t_dec = std::make_unique<ScopeTimer>(
+                        timings, "trusted", "trusted_decrypt",
+                        -1, (int64_t)ts_idx, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps
+                    );
+                }
 
-        auto decrypt_end = high_resolution_clock::now();
-        double decrypt_time_ms = duration_cast<nanoseconds>(decrypt_end - decrypt_start).count() / 1e6;
-        total_trusted_decrypt_ms += decrypt_time_ms;
+                for (size_t coord = 0; coord < vector_dim; coord++) {
+                    size_t stream_idx = ts_idx * vector_dim + coord;
 
-        // TRUSTED: Apply differential privacy if enabled
-        vector<double> final_result;
-        if (enable_dp) {
-            auto dp_start = high_resolution_clock::now();
+                    NativeInteger sum = agg_ct.ciphertext[coord].ModAdd(
+                        server.precomputed_p_prime[stream_idx], q_mod);
 
-            uint32_t sensitivity = t - 1;  // Maximum value per coordinate
+                    uint64_t raw = sum.ConvertToInt();
 
-            if (dp_mechanism == "laplace") {
-                final_result = add_laplace_noise(decrypted_sum, epsilon, sensitivity);
-            } else if (dp_mechanism == "gaussian") {
-                final_result = add_gaussian_noise(decrypted_sum, epsilon, delta, sensitivity);
-            } else {
-                cerr << "Unknown DP mechanism: " << dp_mechanism << endl;
-                return 1;
-            }
+                    int64_t signed_val;
+                    if (raw > q_val / 2) {
+                        signed_val = static_cast<int64_t>(raw) - static_cast<int64_t>(q_val);
+                    } else {
+                        signed_val = static_cast<int64_t>(raw);
+                    }
 
-            auto dp_end = high_resolution_clock::now();
-            double dp_time_ms = duration_cast<nanoseconds>(dp_end - dp_start).count() / 1e6;
-            total_dp_noise_ms += dp_time_ms;
+                    int64_t result = signed_val % static_cast<int64_t>(t_plain);
+                    if (result < 0) result += static_cast<int64_t>(t_plain);
 
-            // Save noisy results
-            string noisy_file = "data/noisy_sum_" + to_string(ts_idx) + ".txt";
-            ofstream noisy_out(noisy_file);
-            for (size_t coord = 0; coord < vector_dim; coord++) {
-                noisy_out << final_result[coord];
-                if (coord + 1 < vector_dim) noisy_out << ' ';
-            }
-            noisy_out << endl;
-            noisy_out.close();
-        }
-
-        // Verify (only if DP is disabled)
-        if (!enable_dp) {
-            string sum_file = "data/expected_sum_" + to_string(ts_idx) + ".txt";
-            ifstream sum_in(sum_file);
-            if (!sum_in) {
-                throw runtime_error("Failed to open " + sum_file);
-            }
-
-            for (size_t coord = 0; coord < vector_dim; coord++) {
-                uint64_t expected;
-                sum_in >> expected;
-                if (decrypted_sum[coord] != expected) {
-                    cerr << "Timestamp " << ts_idx << " coord " << coord
-                         << " FAILED: Expected " << expected
-                         << ", Got " << decrypted_sum[coord] << endl;
-                    all_passed = false;
+                    decrypted_sum[coord] = static_cast<uint32_t>(result);
                 }
             }
-            sum_in.close();
+
+            if (enable_dp) {
+                vector<double> final_result;
+                {
+                    std::unique_ptr<ScopeTimer> t_dp;
+                    if (log_per_timestamp) {
+                        t_dp = std::make_unique<ScopeTimer>(
+                            timings, "trusted", "trusted_dp_noise",
+                            -1, (int64_t)ts_idx, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps
+                        );
+                    }
+
+                    uint32_t sensitivity = (uint32_t)(t_plain - 1);
+
+                    if (dp_mechanism == "laplace") {
+                        final_result = add_laplace_noise(decrypted_sum, epsilon, sensitivity);
+                    } else if (dp_mechanism == "gaussian") {
+                        final_result = add_gaussian_noise(decrypted_sum, epsilon, delta, sensitivity);
+                    } else {
+                        cerr << "Unknown DP mechanism: " << dp_mechanism << endl;
+                        return 1;
+                    }
+                }
+
+                {
+                    std::unique_ptr<ScopeTimer> t_save;
+                    if (log_per_timestamp) {
+                        t_save = std::make_unique<ScopeTimer>(
+                            timings, "trusted", "save_noisy_sum",
+                            -1, (int64_t)ts_idx, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps
+                        );
+                    }
+
+                    string noisy_file = "data/noisy_sum_" + to_string(ts_idx) + ".txt";
+                    ofstream noisy_out(noisy_file);
+                    for (size_t coord = 0; coord < vector_dim; coord++) {
+                        noisy_out << final_result[coord];
+                        if (coord + 1 < vector_dim) noisy_out << ' ';
+                    }
+                    noisy_out << endl;
+                }
+            } else {
+                std::unique_ptr<ScopeTimer> t_verify;
+                if (log_per_timestamp) {
+                    t_verify = std::make_unique<ScopeTimer>(
+                        timings, "trusted", "verify_expected_sum",
+                        -1, (int64_t)ts_idx, (int64_t)vector_dim, n_clients_meta, (int64_t)n_timestamps
+                    );
+                }
+
+                string sum_file = "data/expected_sum_" + to_string(ts_idx) + ".txt";
+                ifstream sum_in(sum_file);
+                if (!sum_in) {
+                    throw runtime_error("Failed to open " + sum_file);
+                }
+
+                for (size_t coord = 0; coord < vector_dim; coord++) {
+                    uint64_t expected;
+                    sum_in >> expected;
+                    if (decrypted_sum[coord] != expected) {
+                        cerr << "Timestamp " << ts_idx << " coord " << coord
+                             << " FAILED: Expected " << expected
+                             << ", Got " << decrypted_sum[coord] << endl;
+                        all_passed = false;
+                    }
+                }
+            }
         }
     }
 
-    cout << "\n=== Performance Results ===" << endl;
-    cout << "Per-Timestamp Breakdown:" << endl;
-    cout << "  Untrusted I/O (avg): " << (total_untrusted_io_ms / n_timestamps) << " ms" << endl;
-    cout << "  Trusted decrypt (avg): " << (total_trusted_decrypt_ms / n_timestamps) << " ms" << endl;
-    if (enable_dp) {
-        cout << "  DP noise addition (avg): " << (total_dp_noise_ms / n_timestamps) << " ms" << endl;
-    }
-    cout << "  Total per timestamp: " << ((total_untrusted_io_ms + total_trusted_decrypt_ms + total_dp_noise_ms) / n_timestamps) << " ms" << endl;
-
-    cout << "\nTotal Times:" << endl;
-    cout << "  Untrusted I/O: " << total_untrusted_io_ms << " ms" << endl;
-    cout << "  Trusted decryption: " << total_trusted_decrypt_ms << " ms" << endl;
-    if (enable_dp) {
-        cout << "  DP noise addition: " << total_dp_noise_ms << " ms" << endl;
-    }
-    cout << "  Combined runtime: " << (total_untrusted_io_ms + total_trusted_decrypt_ms + total_dp_noise_ms) << " ms" << endl;
+    timings.flush();
 
     if (enable_dp) {
-        cout << "\nDifferential Privacy Summary:" << endl;
-        cout << "  Noisy results saved to data/noisy_sum_*.txt" << endl;
-        cout << "  Privacy guarantee: " << dp_mechanism << "-DP" << endl;
-        cout << "  Per-timestamp epsilon: " << epsilon << endl;
-        cout << "  Total privacy cost: " << (epsilon * n_timestamps) << endl;
-        if (dp_mechanism == "gaussian") {
-            cout << "  Delta: " << delta << endl;
-        }
+        cout << "Noisy results saved to data/noisy_sum_*.txt" << endl;
     } else {
-        cout << "\nVerification: " << (all_passed ? "ALL PASSED" : "SOME FAILED") << endl;
+        cout << "Verification: " << (all_passed ? "ALL PASSED" : "SOME FAILED") << endl;
     }
 
     return (enable_dp || all_passed) ? 0 : 1;

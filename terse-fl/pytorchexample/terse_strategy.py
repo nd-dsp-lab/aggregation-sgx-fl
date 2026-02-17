@@ -4,6 +4,8 @@ import numpy as np
 import torch
 from typing import Dict, List, Optional, Tuple
 from flwr.server.strategy import FedAvg
+from flwr.common import FitIns
+from pytorchexample.schedule_io import load_schedule_bin
 from flwr.common import (
     Parameters,
     FitRes,
@@ -41,7 +43,15 @@ class TERSEFedAvg(FedAvg):
 
 def aggregate_fit(self, server_round, results, failures):
     if failures:
-        raise RuntimeError(f"Aggregation aborted due to failures: {failures}")
+        # TERSE cannot safely decrypt with missing participants for that round
+        cur_params = ndarrays_to_parameters(self._unflatten_parameters(self._current_flat))
+        return cur_params, {
+            "skipped": 1,
+            "reason": "failures_present",
+            "num_failures": len(failures),
+            "num_results": len(results),
+        }
+
 
     round_offset = (server_round - 1) * self.n_chunks
     chunk_aggregates = []

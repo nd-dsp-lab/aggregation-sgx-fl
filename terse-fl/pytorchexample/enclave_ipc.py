@@ -1,8 +1,25 @@
 import atexit
 import subprocess
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+
+@dataclass(frozen=True)
+class EnclaveDPConfig:
+    """
+    DP configuration that is passed over IPC to the enclave.
+
+    dp_mech:
+      - 0: none
+      - 1: laplace
+      - 2: gaussian
+    """
+    dp_mech: int = 0
+    epsilon: float = 0.0
+    delta: float = 0.0
+    sensitivity: int = 0
 
 
 class PersistentTrustedRound:
@@ -10,7 +27,8 @@ class PersistentTrustedRound:
     Keeps ONE `gramine-sgx sgx/trusted_round` process alive and reuses it.
 
     Protocol (line-based):
-      - Python -> Enclave: "DECRYPT <start_ts> <n_chunks> <vector_dim>\\n"
+      - Python -> Enclave:
+          "DECRYPT <start_ts> <n_chunks> <vector_dim> <dp_mech> <epsilon> <delta> <sensitivity>\\n"
       - Enclave -> Python: "OK\\n" or "ERR <message>\\n"
       - Python -> Enclave: "QUIT\\n"
       - Enclave -> Python: "OK\\n"
@@ -25,7 +43,31 @@ class PersistentTrustedRound:
     ):
         self.project_root = Path(project_root).resolve()
         self.cwd = Path(cwd).resolve() if cwd is not None else self.project_root
-        self.cmd = cmd or ["gramine-sgx", "sgx/trusted_round"]
+
+        # Default command uses the canonical SGX runtime layout:
+        #   <project_root>/sgx/trusted_round
+        #   <project_root>/sgx/trusted_round.manifest.sgx
+        #
+        # Note: do NOT .resolve() the sgx/trusted_round path; it may be a symlink
+        # and Gramine locates the manifest next to the path you execute.
+        if cmd is None:
+            trusted_round_path = self.project_root / "sgx" / "trusted_round"
+            manifest_sgx_path = self.project_root / "sgx" / "trusted_round.manifest.sgx"
+
+            if not trusted_round_path.exists():
+                raise FileNotFoundError(
+                    f"SGX launcher not found: {trusted_round_path}\n"
+                    f"Run `make sgx` in {self.project_root} (it should create sgx/trusted_round)."
+                )
+            if not manifest_sgx_path.exists():
+                raise FileNotFoundError(
+                    f"SGX manifest not found: {manifest_sgx_path}\n"
+                    f"Run `make sgx` in {self.project_root} (it should create sgx/trusted_round.manifest.sgx)."
+                )
+
+            self.cmd = ["gramine-sgx", str(trusted_round_path)]
+        else:
+            self.cmd = cmd
 
         self._stderr_file = None
         if stderr_path is not None:
@@ -46,7 +88,6 @@ class PersistentTrustedRound:
         if self.p.stdin is None or self.p.stdout is None:
             raise RuntimeError("Failed to open stdin/stdout pipes to enclave process")
 
-        # If using stderr=PIPE, drain it to avoid deadlocks.
         self._stop_stderr = threading.Event()
         self._stderr_thread = None
         if self._stderr_file is None and self.p.stderr is not None:
@@ -61,7 +102,6 @@ class PersistentTrustedRound:
                 line = self.p.stderr.readline()  # type: ignore[union-attr]
                 if not line:
                     return
-                # If you want: forward to logging/print here.
         except Exception:
             return
 
@@ -72,11 +112,22 @@ class PersistentTrustedRound:
             raise RuntimeError(f"trusted_round exited unexpectedly (returncode={rc})")
         return line.rstrip("\n")
 
-    def decrypt_round(self, start_ts: int, n_chunks: int, vector_dim: int) -> None:
+    def decrypt_round(
+        self,
+        start_ts: int,
+        n_chunks: int,
+        vector_dim: int,
+        dp: Optional[EnclaveDPConfig] = None,
+    ) -> None:
         if self.p.poll() is not None:
             raise RuntimeError("trusted_round process is not running")
 
-        self.p.stdin.write(f"DECRYPT {start_ts} {n_chunks} {vector_dim}\n")
+        dp = dp or EnclaveDPConfig()
+
+        self.p.stdin.write(
+            f"DECRYPT {start_ts} {n_chunks} {vector_dim} "
+            f"{dp.dp_mech} {dp.epsilon} {dp.delta} {dp.sensitivity}\n"
+        )
         self.p.stdin.flush()
 
         resp = self._readline()
