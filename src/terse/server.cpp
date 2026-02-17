@@ -6,8 +6,14 @@
 #include <chrono>
 #include <numeric>
 
+#include <fstream>
+#include <sstream>
+#include <mutex>
+#include <vector>
+#include <cstdlib>
+#include <ctime>
+
 using namespace std;
-using namespace std::chrono;
 
 static TERSEParams load_params() {
     return TERSEParams::load("data/params.bin");
@@ -34,6 +40,118 @@ static vector<vector<vector<NativeInteger>>> load_all_ciphertexts(
     return all_cts;
 }
 
+// ---------------------- CSV timing utilities ----------------------
+
+static uint64_t unix_time_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+class CsvTimings {
+public:
+    explicit CsvTimings(string path) : path_(std::move(path)) {}
+
+    void log_event(uint64_t unix_ns,
+                   const string& component,
+                   const string& phase,
+                   int64_t client_idx,
+                   int64_t ts,
+                   int64_t vector_dim,
+                   int64_t n_clients,
+                   int64_t n_timestamps,
+                   uint64_t duration_us) {
+        ostringstream oss;
+        oss << unix_ns << ","
+            << component << ","
+            << phase << ","
+            << client_idx << ","
+            << ts << ","
+            << vector_dim << ","
+            << n_clients << ","
+            << n_timestamps << ","
+            << duration_us
+            << "\n";
+
+        lock_guard<mutex> lk(mu_);
+        buf_.push_back(oss.str());
+    }
+
+    void flush() {
+        lock_guard<mutex> lk(mu_);
+
+        filesystem::create_directories(filesystem::path(path_).parent_path());
+
+        const bool need_header = !file_exists_nonempty_();
+        ofstream out(path_, ios::app);
+        if (!out) throw runtime_error("Failed to open timings file: " + path_);
+
+        if (need_header) {
+            out << "unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us\n";
+        }
+        for (const auto& line : buf_) out << line;
+        buf_.clear();
+    }
+
+    ~CsvTimings() {
+        try { flush(); } catch (...) {}
+    }
+
+private:
+    bool file_exists_nonempty_() const {
+        ifstream in(path_, ios::binary);
+        return in.good() && in.peek() != ifstream::traits_type::eof();
+    }
+
+    string path_;
+    mutex mu_;
+    vector<string> buf_;
+};
+
+class ScopeTimer {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    ScopeTimer(CsvTimings& timings,
+               string component,
+               string phase,
+               int64_t client_idx,
+               int64_t ts,
+               int64_t vector_dim,
+               int64_t n_clients,
+               int64_t n_timestamps)
+        : timings_(timings),
+          component_(std::move(component)),
+          phase_(std::move(phase)),
+          client_idx_(client_idx),
+          ts_(ts),
+          vector_dim_(vector_dim),
+          n_clients_(n_clients),
+          n_timestamps_(n_timestamps),
+          unix_ns_(unix_time_ns()),
+          start_(Clock::now()) {}
+
+    ~ScopeTimer() {
+        auto end = Clock::now();
+        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
+        timings_.log_event(unix_ns_, component_, phase_, client_idx_, ts_, vector_dim_, n_clients_, n_timestamps_, us);
+    }
+
+private:
+    CsvTimings& timings_;
+    string component_;
+    string phase_;
+    int64_t client_idx_;
+    int64_t ts_;
+    int64_t vector_dim_;
+    int64_t n_clients_;
+    int64_t n_timestamps_;
+    uint64_t unix_ns_;
+    Clock::time_point start_;
+};
+
+// ---------------------- main ----------------------
+
 int main(int argc, char* argv[]) {
     if (argc != 4) {
         cerr << "Usage: " << argv[0] << " <n_clients> <n_timestamps> <vector_dim>" << endl;
@@ -43,6 +161,10 @@ int main(int argc, char* argv[]) {
     size_t n_clients = stoull(argv[1]);
     size_t n_timestamps = stoull(argv[2]);
     size_t vector_dim = stoull(argv[3]);
+
+    // CSV timings: buffered, minimal console output
+    CsvTimings timings("data/results/timings.server.csv");
+    const bool log_per_timestamp = (std::getenv("TERSE_LOG_PER_TIMESTAMP") != nullptr);
 
     TERSEParams params = load_params();
     TERSESystem system(params);
@@ -66,79 +188,74 @@ int main(int argc, char* argv[]) {
                           ->GetElementParams()->GetParams()[0]->GetModulus();
     uint64_t q_val = q_mod.ConvertToInt();
 
-    cout << "=== TERSE Server Aggregation ===" << endl;
-    cout << "Loading ciphertexts from " << n_clients << " clients..." << flush;
+    cout << "=== TERSE Server Aggregation (CSV timings -> data/results/timings.server.csv) ===" << endl;
 
-    auto load_ct_start = high_resolution_clock::now();
-    vector<vector<vector<NativeInteger>>> all_ciphertexts = load_all_ciphertexts(system, n_clients);
-    auto load_ct_end = high_resolution_clock::now();
-    double load_ct_ms = duration_cast<nanoseconds>(load_ct_end - load_ct_start).count() / 1e6;
-
-    cout << " Done (" << load_ct_ms << " ms)" << endl;
-
-    vector<double> per_aggregation_times;
-    per_aggregation_times.reserve(n_timestamps);
-
-    cout << "\nAggregating ciphertexts (untrusted - no decryption)..." << endl;
-    auto agg_total_start = high_resolution_clock::now();
-
-    for (size_t ts = 0; ts < n_timestamps; ts++) {
-        // Progress update
-        if (n_timestamps >= 1000) {
-            size_t progress_interval = max(1UL, n_timestamps / 100);
-            if (ts % progress_interval == 0 || ts == n_timestamps - 1) {
-                double percent = (100.0 * ts) / n_timestamps;
-                auto current_time = high_resolution_clock::now();
-                double elapsed_ms = duration_cast<milliseconds>(current_time - agg_total_start).count();
-                double rate = (ts > 0) ? (ts / (elapsed_ms / 1000.0)) : 0;
-
-                cout << "\r  Progress: " << fixed << setprecision(1) << percent << "% "
-                     << "(" << ts << "/" << n_timestamps << " timestamps, "
-                     << static_cast<int>(rate) << " ts/sec)" << flush;
-            }
-        }
-
-        auto agg_start = high_resolution_clock::now();
-
-        // PUBLIC AGGREGATION: Just sum ciphertexts (no p')
-        // ŷ_ts,j ← Σᵢ cᵢ,ts,j mod q
-        vector<NativeInteger> aggregate(vector_dim);
-
-        for (size_t coord = 0; coord < vector_dim; coord++) {
-            __uint128_t sum = 0;
-
-            for (size_t client_idx = 0; client_idx < n_clients; client_idx++) {
-                sum += all_ciphertexts[client_idx][ts][coord].ConvertToInt();
-            }
-
-            uint64_t reduced = static_cast<uint64_t>(sum % q_val);
-            aggregate[coord] = NativeInteger(reduced);
-        }
-
-        // Save encrypted aggregate for trusted party
-        string agg_file = "data/encrypted_aggregate_" + to_string(ts) + ".bin";
-        system.save_aggregate_vector(aggregate, agg_file);
-
-        auto agg_end = high_resolution_clock::now();
-        double agg_time_ms = duration_cast<nanoseconds>(agg_end - agg_start).count() / 1e6;
-        per_aggregation_times.push_back(agg_time_ms);
+    vector<vector<vector<NativeInteger>>> all_ciphertexts;
+    {
+        ScopeTimer t(timings, "server", "load_ciphertexts_total",
+                     -1, -1, (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps);
+        all_ciphertexts = load_all_ciphertexts(system, n_clients);
     }
 
-    auto agg_total_end = high_resolution_clock::now();
-    double agg_total_ms = duration_cast<nanoseconds>(agg_total_end - agg_total_start).count() / 1e6;
+    cout << "Aggregating ciphertexts (untrusted - no decryption)..." << endl;
 
-    cout << "\r" << string(80, ' ') << "\r";  // Clear progress line
+    {
+        ScopeTimer t_total(timings, "server", "aggregate_total",
+                           -1, -1, (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps);
 
-    double avg_per_agg_ms = accumulate(per_aggregation_times.begin(), 
-                                       per_aggregation_times.end(), 0.0) / per_aggregation_times.size();
+        for (size_t ts = 0; ts < n_timestamps; ts++) {
+            // Optional progress (single updating line)
+            if (n_timestamps >= 1000) {
+                size_t progress_interval = max<size_t>(1, n_timestamps / 100);
+                if (ts % progress_interval == 0 || ts == n_timestamps - 1) {
+                    double percent = (100.0 * ts) / n_timestamps;
+                    cout << "\r  Progress: " << fixed << setprecision(1)
+                         << percent << "% (" << ts << "/" << n_timestamps << " timestamps)" << flush;
+                }
+            }
 
-    cout << "\n=== Aggregation Results ===" << endl;
-    cout << "Total aggregation time: " << agg_total_ms << " ms" << endl;
-    cout << "Aggregation time (per timestamp, averaged): " << avg_per_agg_ms << " ms" << endl;
-    cout << "Throughput: " << (n_timestamps * 1000.0) / agg_total_ms << " aggregations/second" << endl;
+            // Optional per-timestamp timing (can be large; gated by env var)
+            std::unique_ptr<ScopeTimer> t_ts;
+            if (log_per_timestamp) {
+                t_ts = std::make_unique<ScopeTimer>(
+                    timings, "server", "aggregate_timestamp",
+                    -1, (int64_t)ts, (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps
+                );
+            }
 
-    cout << "\nEncrypted aggregates saved to ./data/encrypted_aggregate_*.bin" << endl;
-    cout << "Run trusted.cpp to decrypt results" << endl;
+            // PUBLIC AGGREGATION: ŷ_ts,j ← Σᵢ cᵢ,ts,j mod q
+            vector<NativeInteger> aggregate(vector_dim);
+
+            for (size_t coord = 0; coord < vector_dim; coord++) {
+                __uint128_t sum = 0;
+                for (size_t client_idx = 0; client_idx < n_clients; client_idx++) {
+                    sum += all_ciphertexts[client_idx][ts][coord].ConvertToInt();
+                }
+                uint64_t reduced = static_cast<uint64_t>(sum % q_val);
+                aggregate[coord] = NativeInteger(reduced);
+            }
+
+            // Save encrypted aggregate for trusted party
+            {
+                ScopeTimer t_save(timings, "server", "save_encrypted_aggregate",
+                                  -1, (int64_t)ts, (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps);
+
+                string agg_file = "data/encrypted_aggregate_" + to_string(ts) + ".bin";
+                system.save_aggregate_vector(aggregate, agg_file);
+            }
+        }
+    }
+
+    cout << "\r" << string(80, ' ') << "\r"; // clear progress line
+
+    timings.flush();
+
+    cout << "Done. Timings: data/results/timings.server.csv" << endl;
+    if (log_per_timestamp) {
+        cout << "Per-timestamp timing was ENABLED (TERSE_LOG_PER_TIMESTAMP set)." << endl;
+    } else {
+        cout << "Per-timestamp timing is DISABLED. Set TERSE_LOG_PER_TIMESTAMP=1 to enable." << endl;
+    }
 
     return 0;
 }

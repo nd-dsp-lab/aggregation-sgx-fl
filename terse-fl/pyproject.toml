@@ -40,12 +40,12 @@ vector-dim = 4096
 plaintext-modulus = 65537
 scale-factor = 1000
 
-fraction-fit = 1.0
+fraction-fit = 0.25
 schedule-seed = 12345
 
 
 [tool.terse.clipping]
-enabled = false
+enabled = true
 l2_clip_norm = 1.0
 
 [tool.terse.dp]

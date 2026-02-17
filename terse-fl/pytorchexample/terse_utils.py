@@ -239,8 +239,15 @@ def run_terse_setup_rounds(
     DATA_DIR.mkdir(exist_ok=True)
     _setup_bins_exist()
 
-    trusted_cmd = [
-        str(SETUP_TRUSTED_BIN),
+    # Prefer SGX (Gramine) if the SGX launcher exists, otherwise fall back to native.
+    sgx_setup_trusted = PROJECT_ROOT / "sgx" / "setup_trusted"
+    if sgx_setup_trusted.exists():
+        trusted_cmd = ["gramine-sgx", str(sgx_setup_trusted)]
+    else:
+        trusted_cmd = [str(SETUP_TRUSTED_BIN)]
+
+    # Append the args exactly as before
+    trusted_cmd += [
         str(n_clients),
         str(n_rounds),
         str(n_chunks),
