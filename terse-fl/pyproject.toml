@@ -26,16 +26,34 @@ publisher = "flwrlabs"
 serverapp = "pytorchexample.server_app:app"
 clientapp = "pytorchexample.client_app:app"
 
+
 [tool.flwr.app.config]
 # Training hyperparameters
-num-server-rounds = 100
+num-server-rounds = 25
 local-epochs = 1
 batch-size = 32
-learning-rate = 0.01
+learning-rate = 0.1
 fraction-evaluate = 1.0
 
-# TERSE-specific configuration
 num-clients = 100
 vector-dim = 4096
 plaintext-modulus = 65537
 scale-factor = 1000
+
+fraction-fit = 1.0
+schedule-seed = 12345
+
+
+[tool.terse.clipping]
+enabled = false
+l2_clip_norm = 1.0
+
+[tool.terse.dp]
+enabled = false
+mechanism = "gaussian"   # "none" | "laplace" | "gaussian"
+epsilon = 1.0
+delta = 1e-5            # only used for gaussian
+
+# Sensitivity in *quantized integer units*.
+# If 0, it will be derived from clipping: round(l2_clip_norm * scale_factor).
+sensitivity = 0

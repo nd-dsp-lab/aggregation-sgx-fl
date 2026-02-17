@@ -36,8 +36,11 @@ PYTHON_TARGET     = $(PYTHON_DIR)/terse_py$(PYTHON_EXT_SUFFIX)
 # =========================
 TARGETS = client server trusted trusted_round setup_clients setup_trusted aes_client aes_trusted
 
+# SGX launch entrypoints (we create sgx/<name> as stable paths for gramine-sgx)
+SGX_EXECUTABLES = trusted trusted_round aes_trusted setup_trusted
+SGX_LAUNCHERS   = $(addprefix $(SGX_DIR)/,$(SGX_EXECUTABLES))
 
-.PHONY: all core full python sgx
+.PHONY: all core full python sgx clean cleanall help
 
 # Build just the native executables (fast dev loop)
 core: $(TARGETS)
@@ -45,17 +48,16 @@ core: $(TARGETS)
 # Ship-ready default
 all: core python sgx
 
-
 # =========================
 # Object files (TERSE)
 # =========================
-TERSE_CORE_OBJ         = $(OBJDIR)/terse_terse.o
-TERSE_CLIENT_OBJ       = $(OBJDIR)/terse_client.o
-TERSE_SERVER_OBJ       = $(OBJDIR)/terse_server.o
-TERSE_TRUSTED_OBJ      = $(OBJDIR)/terse_trusted.o
-TERSE_TRUSTED_ROUND_OBJ= $(OBJDIR)/terse_trusted_round.o
-TERSE_SETUP_CLIENTS_OBJ= $(OBJDIR)/terse_setup_clients.o
-TERSE_SETUP_TRUSTED_OBJ= $(OBJDIR)/terse_setup_trusted.o
+TERSE_CORE_OBJ          = $(OBJDIR)/terse_terse.o
+TERSE_CLIENT_OBJ        = $(OBJDIR)/terse_client.o
+TERSE_SERVER_OBJ        = $(OBJDIR)/terse_server.o
+TERSE_TRUSTED_OBJ       = $(OBJDIR)/terse_trusted.o
+TERSE_TRUSTED_ROUND_OBJ = $(OBJDIR)/terse_trusted_round.o
+TERSE_SETUP_CLIENTS_OBJ = $(OBJDIR)/terse_setup_clients.o
+TERSE_SETUP_TRUSTED_OBJ = $(OBJDIR)/terse_setup_trusted.o
 
 # =========================
 # Object files (AES)
@@ -121,12 +123,33 @@ $(PYTHON_TARGET): $(PYTHON_DIR)/terse_python.cpp $(TERSE_CORE_OBJ) | $(OBJDIR)
 		$< $(TERSE_CORE_OBJ) -o $@ $(LDFLAGS) $(LIBS)
 
 # =========================
-# SGX targets (unchanged, assumes binaries are at repo root)
+# SGX targets
+# - Manifests live in ./sgx
+# - We also create ./sgx/<exe> stable launch entrypoints (symlinks) so Python can run:
+#     gramine-sgx sgx/trusted_round
 # =========================
-sgx: $(SGX_DIR)/trusted.manifest.sgx \
+sgx: $(SGX_LAUNCHERS) \
+     $(SGX_DIR)/trusted.manifest.sgx \
      $(SGX_DIR)/trusted_round.manifest.sgx \
      $(SGX_DIR)/aes_trusted.manifest.sgx \
      $(SGX_DIR)/setup_trusted.manifest.sgx
+
+$(SGX_DIR):
+	mkdir -p $(SGX_DIR)
+
+# Create stable SGX launch paths (no manual steps for users).
+# These are symlinks that point to the repo-root binaries.
+$(SGX_DIR)/trusted: trusted | $(SGX_DIR)
+	ln -sf ../trusted $@
+
+$(SGX_DIR)/trusted_round: trusted_round | $(SGX_DIR)
+	ln -sf ../trusted_round $@
+
+$(SGX_DIR)/aes_trusted: aes_trusted | $(SGX_DIR)
+	ln -sf ../aes_trusted $@
+
+$(SGX_DIR)/setup_trusted: setup_trusted | $(SGX_DIR)
+	ln -sf ../setup_trusted $@
 
 $(SGX_DIR)/trusted.manifest: $(SGX_DIR)/trusted.manifest.template trusted
 	gramine-manifest -Dlog_level=error -Darch_libdir=/lib/x86_64-linux-gnu \
@@ -162,6 +185,7 @@ $(SGX_DIR)/trusted_round.manifest.sgx: $(SGX_DIR)/trusted_round.manifest trusted
 clean:
 	rm -rf $(OBJDIR)
 	rm -f $(TARGETS) $(PYTHON_TARGET)
+	rm -f $(SGX_LAUNCHERS)
 	rm -f $(SGX_DIR)/*.manifest $(SGX_DIR)/*.manifest.sgx $(SGX_DIR)/*.sig $(SGX_DIR)/*.token
 
 cleanall: clean
@@ -174,7 +198,7 @@ help:
 	@echo "Available targets:"
 	@echo "  all          - Build all C++ binaries (default)"
 	@echo "  python       - Build Python bindings (terse_py module)"
-	@echo "  sgx          - Build SGX manifests"
+	@echo "  sgx          - Build SGX manifests + SGX launch entrypoints in ./sgx/"
 	@echo "  clean        - Remove build artifacts"
 	@echo "  cleanall     - Remove build artifacts and data directory contents"
 	@echo ""

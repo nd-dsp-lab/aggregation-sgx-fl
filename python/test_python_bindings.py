@@ -24,15 +24,15 @@ def test_basic_encryption_decryption():
 
     print(f"Clients: {n_clients}, Timestamps: {n_timestamps}, Vector dim: {vector_dim}")
 
-    # Run C++ setup first
+    # Run C++ setup first (TEE first)
     print("\nRunning setup (C++)...")
-    os.system(f"./setup_clients {n_clients} {n_timestamps} {vector_dim}")
     os.system(f"./setup_trusted {n_clients} {n_timestamps} {vector_dim}")
+    os.system(f"./setup_clients {n_clients} {n_timestamps} {vector_dim}")
 
     # Initialize Python wrappers
     print("\nInitializing Python wrappers...")
     try:
-        clients = [terse_py.TERSEClient("data/params.bin", i) 
+        clients = [terse_py.TERSEClient("data/params.bin", i)
                    for i in range(n_clients)]
         server = terse_py.TERSEServer("data/params.bin")
         trusted = terse_py.TERSETrusted("data/params.bin", "data/server_key.bin")
@@ -54,7 +54,7 @@ def test_basic_encryption_decryption():
     print(f"Expected sum: {expected_sum}")
 
     try:
-        encrypted = [client.encrypt_vector(data, timestamp) 
+        encrypted = [client.encrypt_vector(data, timestamp)
                      for client, data in zip(clients, test_data)]
         print(f"✓ Encrypted {len(encrypted)} vectors")
         print(f"  Ciphertext shape: {encrypted[0].shape}")
@@ -105,10 +105,10 @@ def test_multiple_timestamps():
 
     print(f"Testing {n_timestamps} timestamps...")
 
-    os.system(f"./setup_clients {n_clients} {n_timestamps} {vector_dim}")
     os.system(f"./setup_trusted {n_clients} {n_timestamps} {vector_dim}")
+    os.system(f"./setup_clients {n_clients} {n_timestamps} {vector_dim}")
 
-    clients = [terse_py.TERSEClient("data/params.bin", i) 
+    clients = [terse_py.TERSEClient("data/params.bin", i)
                for i in range(n_clients)]
     server = terse_py.TERSEServer("data/params.bin")
     trusted = terse_py.TERSETrusted("data/params.bin", "data/server_key.bin")
@@ -117,12 +117,12 @@ def test_multiple_timestamps():
 
     for ts in range(n_timestamps):
         # Generate random data
-        data = [np.random.randint(0, 100, vector_dim, dtype=np.uint32) 
+        data = [np.random.randint(0, 100, vector_dim, dtype=np.uint32)
                 for _ in range(n_clients)]
         expected = sum(data)
 
         # Encrypt, aggregate, decrypt
-        encrypted = [client.encrypt_vector(d, ts) 
+        encrypted = [client.encrypt_vector(d, ts)
                      for client, d in zip(clients, data)]
         aggregate = server.aggregate_ciphertexts(encrypted, ts)
         server.save_aggregate(aggregate, ts)
@@ -146,21 +146,21 @@ def test_large_vector():
 
     print(f"Testing vector dimension: {vector_dim}")
 
-    os.system(f"./setup_clients {n_clients} {n_timestamps} {vector_dim}")
     os.system(f"./setup_trusted {n_clients} {n_timestamps} {vector_dim}")
+    os.system(f"./setup_clients {n_clients} {n_timestamps} {vector_dim}")
 
-    clients = [terse_py.TERSEClient("data/params.bin", i) 
+    clients = [terse_py.TERSEClient("data/params.bin", i)
                for i in range(n_clients)]
     server = terse_py.TERSEServer("data/params.bin")
     trusted = terse_py.TERSETrusted("data/params.bin", "data/server_key.bin")
 
     # Generate data
-    data = [np.random.randint(0, 1000, vector_dim, dtype=np.uint32) 
+    data = [np.random.randint(0, 1000, vector_dim, dtype=np.uint32)
             for _ in range(n_clients)]
     expected = sum(data)
 
     # Process
-    encrypted = [client.encrypt_vector(d, 0) 
+    encrypted = [client.encrypt_vector(d, 0)
                  for client, d in zip(clients, data)]
     aggregate = server.aggregate_ciphertexts(encrypted, 0)
     server.save_aggregate(aggregate, 0)
@@ -180,8 +180,8 @@ def test_error_handling():
     print("\n=== Test 4: Error Handling ===")
 
     # Setup minimal system
-    os.system("./setup_clients 1 1 1")
     os.system("./setup_trusted 1 1 1")
+    os.system("./setup_clients 1 1 1")
 
     client = terse_py.TERSEClient("data/params.bin", 0)
 

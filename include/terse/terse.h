@@ -1,4 +1,3 @@
-// terse.h
 #ifndef TERSE_H
 #define TERSE_H
 
@@ -76,11 +75,10 @@ public:
     DCRTPoly generate_A_theta(uint64_t theta);
     void save_A_theta(const DCRTPoly& A_theta, const string& filename) const;
     DCRTPoly load_A_theta(const string& filename) const;
-    
+
     void precompute_client(TERSEClient& client, const DCRTPoly& A_theta, size_t tau);
     void precompute_server(TERSEServer& server, const DCRTPoly& A_theta, size_t tau);
 
-    // Batch precomputation methods
     void precompute_client_batch(TERSEClient& client, const DCRTPoly& A_theta);
     void precompute_server_batch(TERSEServer& server, const DCRTPoly& A_theta);
 

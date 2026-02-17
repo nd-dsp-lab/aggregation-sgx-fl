@@ -140,7 +140,9 @@ TimestampSplit TERSESystem::parse_timestamp(uint64_t timestamp, uint32_t poly_de
 vector<TERSEClient> TERSESystem::generate_client_keys(size_t n) {
     n_clients = n;
 
-    params.cipher_modulus = params.compute_secure_modulus(n_clients);
+    // In this codebase, encryption/aggregation uses the first tower modulus.
+    NativeInteger q_mod = element_params->GetParams()[0]->GetModulus();
+    params.cipher_modulus = q_mod.ConvertToInt();
     params.validate_parameters(n_clients);
 
     vector<TERSEClient> clients(n);
