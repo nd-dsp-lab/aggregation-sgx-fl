@@ -1,147 +1,34 @@
-// trusted_round.cpp (CSV timings added)
+// trusted_round.cpp (SUMMARY CSV timings)
 //
-// Writes buffered CSV timing events to: data/results/timings.trusted_round.csv
+// Writes aggregated summary timing stats to:
+//   data/results/timings.trusted_round.summary.csv
 //
-// CSV columns (same schema as other tools):
-//   unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us
+// CSV columns:
+//   component,phase,count,mean_us,stddev_us,min_us,max_us,range_us
 //
 // Notes:
-// - `ts` is used as an index:
-//   - per-chunk/per-timestamp events: ts = ts_idx
-//   - per-command/range totals: ts = start_ts
+// - `ts` is used as an index in code, but summary output aggregates only by (component, phase).
 //
 // Optional env vars:
-// - TERSE_LOG_PER_TIMESTAMP=1  -> emit per-ts rows inside decrypt_range (I/O, decrypt, DP, save)
+// - TERSE_LOG_PER_TIMESTAMP=1  -> include per-ts phases in the summary inside decrypt_range
 
 #include "terse/terse.h"
+#include "common/terse_timings_summary.h"
+
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <chrono>
-#include <filesystem>
-#include <mutex>
 #include <cstdlib>
-#include <ctime>
 
 using namespace std;
-
-// ---------------------- CSV timing utilities ----------------------
-
-static uint64_t unix_time_ns() {
-    timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-class CsvTimings {
-public:
-    explicit CsvTimings(string path) : path_(std::move(path)) {}
-
-    void log_event(uint64_t unix_ns,
-                   const string& component,
-                   const string& phase,
-                   int64_t client_idx,
-                   int64_t ts,
-                   int64_t vector_dim,
-                   int64_t n_clients,
-                   int64_t n_timestamps,
-                   uint64_t duration_us) {
-        ostringstream oss;
-        oss << unix_ns << ","
-            << component << ","
-            << phase << ","
-            << client_idx << ","
-            << ts << ","
-            << vector_dim << ","
-            << n_clients << ","
-            << n_timestamps << ","
-            << duration_us
-            << "\n";
-
-        lock_guard<mutex> lk(mu_);
-        buf_.push_back(oss.str());
-    }
-
-    void flush() {
-        lock_guard<mutex> lk(mu_);
-
-        filesystem::create_directories(filesystem::path(path_).parent_path());
-
-        const bool need_header = !file_exists_nonempty_();
-        ofstream out(path_, ios::app);
-        if (!out) throw runtime_error("Failed to open timings file: " + path_);
-
-        if (need_header) {
-            out << "unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us\n";
-        }
-        for (const auto& line : buf_) out << line;
-        buf_.clear();
-    }
-
-    ~CsvTimings() {
-        try { flush(); } catch (...) {}
-    }
-
-private:
-    bool file_exists_nonempty_() const {
-        ifstream in(path_, ios::binary);
-        return in.good() && in.peek() != ifstream::traits_type::eof();
-    }
-
-    string path_;
-    mutex mu_;
-    vector<string> buf_;
-};
-
-class ScopeTimer {
-public:
-    using Clock = std::chrono::steady_clock;
-
-    ScopeTimer(CsvTimings& timings,
-               string component,
-               string phase,
-               int64_t client_idx,
-               int64_t ts,
-               int64_t vector_dim,
-               int64_t n_clients,
-               int64_t n_timestamps)
-        : timings_(timings),
-          component_(std::move(component)),
-          phase_(std::move(phase)),
-          client_idx_(client_idx),
-          ts_(ts),
-          vector_dim_(vector_dim),
-          n_clients_(n_clients),
-          n_timestamps_(n_timestamps),
-          unix_ns_(unix_time_ns()),
-          start_(Clock::now()) {}
-
-    ~ScopeTimer() {
-        auto end = Clock::now();
-        uint64_t us =
-            (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
-        timings_.log_event(unix_ns_, component_, phase_, client_idx_, ts_, vector_dim_, n_clients_, n_timestamps_, us);
-    }
-
-private:
-    CsvTimings& timings_;
-    string component_;
-    string phase_;
-    int64_t client_idx_;
-    int64_t ts_;
-    int64_t vector_dim_;
-    int64_t n_clients_;
-    int64_t n_timestamps_;
-    uint64_t unix_ns_;
-    Clock::time_point start_;
-};
 
 static int64_t load_i64_from_file_or(const string& filename, int64_t fallback) {
     ifstream in(filename);
@@ -417,10 +304,10 @@ int main(int argc, char* argv[]) {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
-    CsvTimings timings("data/results/timings.trusted_round.csv");
+    CsvTimings timings("data/results/timings.trusted_round.summary.csv");
     const bool log_per_timestamp = (std::getenv("TERSE_LOG_PER_TIMESTAMP") != nullptr);
 
-    // Best-effort metadata for context columns
+    // Best-effort metadata for context columns (ignored by summary logger, but kept for call-site compatibility)
     const int64_t n_clients_meta = load_i64_from_file_or("data/n_clients.txt", -1);
     const int64_t n_timestamps_meta = load_i64_from_file_or("data/n_timestamps.txt", -1);
 
@@ -429,7 +316,6 @@ int main(int argc, char* argv[]) {
     TERSESystem system_dummy(TERSEParams(4096, 65537, 0, HEStd_128_classic, 3.2)); // never used; avoids default ctor issues
     (void)system_dummy;
 
-    // Load once per enclave lifetime.
     {
         ScopeTimer t(timings, "trusted_round", "load_params",
                      -1, -1, -1, n_clients_meta, n_timestamps_meta);

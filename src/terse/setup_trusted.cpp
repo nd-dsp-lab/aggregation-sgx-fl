@@ -1,20 +1,21 @@
-// setup_trusted.cpp (CSV timings added)
+// setup_trusted.cpp (SUMMARY CSV timings)
 //
-// Writes buffered CSV timing events to: data/results/timings.setup_trusted.csv
+// Writes aggregated summary timing stats to:
+//   data/results/timings.setup_trusted.summary.csv
 //
-// CSV columns (same as other tools):
-//   unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us
+// CSV columns:
+//   component,phase,count,mean_us,stddev_us,min_us,max_us,range_us
 //
 // Notes:
-// - Here `ts` is reused as a generic index:
-//   - for per-theta events: ts = theta
-//   - for per-round events: ts = round
+// - Here `ts` is reused as a generic index in code (theta/round/etc), but
+//   summary output aggregates only by (component, phase).
 //
 // Optional env vars (granularity controls):
-// - TERSE_LOG_PER_THETA=1   -> emit per-theta events (generate/save A_theta + server precompute per theta)
-// - TERSE_LOG_PER_ROUND=1   -> emit per-round round-key computation events (sampling mode)
+// - TERSE_LOG_PER_THETA=1   -> include per-theta phases in the summary
+// - TERSE_LOG_PER_ROUND=1   -> include per-round phases in the summary
 
 #include "terse/terse.h"
+#include "common/terse_timings_summary.h"
 
 #include <algorithm>
 #include <chrono>
@@ -29,123 +30,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <sstream>
-#include <mutex>
 #include <cstdlib>
-#include <ctime>
 
 using namespace std;
-
-// ---------------------- CSV timing utilities ----------------------
-
-static uint64_t unix_time_ns() {
-    timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-class CsvTimings {
-public:
-    explicit CsvTimings(string path) : path_(std::move(path)) {}
-
-    void log_event(uint64_t unix_ns,
-                   const string& component,
-                   const string& phase,
-                   int64_t client_idx,
-                   int64_t ts,
-                   int64_t vector_dim,
-                   int64_t n_clients,
-                   int64_t n_timestamps,
-                   uint64_t duration_us) {
-        ostringstream oss;
-        oss << unix_ns << ","
-            << component << ","
-            << phase << ","
-            << client_idx << ","
-            << ts << ","
-            << vector_dim << ","
-            << n_clients << ","
-            << n_timestamps << ","
-            << duration_us
-            << "\n";
-
-        lock_guard<mutex> lk(mu_);
-        buf_.push_back(oss.str());
-    }
-
-    void flush() {
-        lock_guard<mutex> lk(mu_);
-
-        filesystem::create_directories(filesystem::path(path_).parent_path());
-
-        const bool need_header = !file_exists_nonempty_();
-        ofstream out(path_, ios::app);
-        if (!out) throw runtime_error("Failed to open timings file: " + path_);
-
-        if (need_header) {
-            out << "unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us\n";
-        }
-        for (const auto& line : buf_) out << line;
-        buf_.clear();
-    }
-
-    ~CsvTimings() {
-        try { flush(); } catch (...) {}
-    }
-
-private:
-    bool file_exists_nonempty_() const {
-        ifstream in(path_, ios::binary);
-        return in.good() && in.peek() != ifstream::traits_type::eof();
-    }
-
-    string path_;
-    mutex mu_;
-    vector<string> buf_;
-};
-
-class ScopeTimer {
-public:
-    using Clock = std::chrono::steady_clock;
-
-    ScopeTimer(CsvTimings& timings,
-               string component,
-               string phase,
-               int64_t client_idx,
-               int64_t ts,
-               int64_t vector_dim,
-               int64_t n_clients,
-               int64_t n_timestamps)
-        : timings_(timings),
-          component_(std::move(component)),
-          phase_(std::move(phase)),
-          client_idx_(client_idx),
-          ts_(ts),
-          vector_dim_(vector_dim),
-          n_clients_(n_clients),
-          n_timestamps_(n_timestamps),
-          unix_ns_(unix_time_ns()),
-          start_(Clock::now()) {}
-
-    ~ScopeTimer() {
-        auto end = Clock::now();
-        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
-        timings_.log_event(unix_ns_, component_, phase_, client_idx_, ts_, vector_dim_, n_clients_, n_timestamps_, us);
-    }
-
-private:
-    CsvTimings& timings_;
-    string component_;
-    string phase_;
-    int64_t client_idx_;
-    int64_t ts_;
-    int64_t vector_dim_;
-    int64_t n_clients_;
-    int64_t n_timestamps_;
-    uint64_t unix_ns_;
-    Clock::time_point start_;
-};
 
 // ---------------------- original helpers ----------------------
 
@@ -246,7 +133,7 @@ static void save_schedule_bin(
 // ---------------------- main ----------------------
 
 int main(int argc, char* argv[]) {
-    CsvTimings timings("data/results/timings.setup_trusted.csv");
+    CsvTimings timings("data/results/timings.setup_trusted.summary.csv");
     const bool log_per_theta = (std::getenv("TERSE_LOG_PER_THETA") != nullptr);
     const bool log_per_round = (std::getenv("TERSE_LOG_PER_ROUND") != nullptr);
 
@@ -300,7 +187,7 @@ int main(int argc, char* argv[]) {
 
     ensure_data_dir();
 
-    cout << "=== TERSE Trusted Setup (TEE; CSV -> data/results/timings.setup_trusted.csv) ===\n";
+    cout << "=== TERSE Trusted Setup (TEE; summary CSV -> data/results/timings.setup_trusted.summary.csv) ===\n";
     cout << "Config:\n";
     cout << "  n_clients=" << n_clients << "\n";
     cout << "  n_rounds=" << n_rounds << "\n";
@@ -310,11 +197,9 @@ int main(int argc, char* argv[]) {
     cout << "  fraction_fit=" << fraction_fit << "\n";
     cout << "  schedule_seed=" << schedule_seed << "\n";
 
-    // Public parameters are chosen/instantiated by the TEE.
     TERSEParams params(4096, 65537, 0, HEStd_128_classic, 3.2);
     TERSESystem system(params);
 
-    // Persist metadata
     {
         ScopeTimer t(timings, "setup_trusted", "save_metadata",
                      -1, -1, (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps);
@@ -350,7 +235,6 @@ int main(int argc, char* argv[]) {
         clients = system.generate_client_keys(n_clients);
     }
 
-    // Save params.bin AFTER generate_client_keys updates params.cipher_modulus via context
     {
         ScopeTimer t(timings, "setup_trusted", "save_params_bin",
                      -1, -1, (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps);
@@ -367,7 +251,6 @@ int main(int argc, char* argv[]) {
     }
     cout << "Wrote data/client_keys.bin\n";
 
-    // Schedule generation + save
     vector<vector<uint32_t>> participants;
     if (!all_clients_every_round) {
         cout << "\nGenerating per-round participant schedule inside TEE...\n";
@@ -395,7 +278,6 @@ int main(int argc, char* argv[]) {
     }
     cout << "Wrote data/schedule.bin\n";
 
-    // Round keys s'_r computation
     cout << "\nComputing server-side round keys inside TEE...\n";
 
     auto ZeroLike = [&](const DCRTPoly& ref) {
@@ -437,7 +319,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Theta generation + server p' precompute
     size_t total_streams = n_timestamps * vector_dim;
     size_t N = system.get_params().poly_modulus_degree;
     size_t n_theta = (total_streams + N - 1) / N;
@@ -456,7 +337,6 @@ int main(int argc, char* argv[]) {
                            -1, -1, (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps);
 
         for (uint64_t theta = 0; theta < (uint64_t)n_theta; theta++) {
-            // generate A_theta
             DCRTPoly A_theta;
             {
                 std::unique_ptr<ScopeTimer> t_theta;
@@ -469,7 +349,6 @@ int main(int argc, char* argv[]) {
                 A_theta = system.generate_A_theta(theta);
             }
 
-            // save A_theta
             {
                 std::unique_ptr<ScopeTimer> t_theta;
                 if (log_per_theta) {
@@ -486,7 +365,6 @@ int main(int argc, char* argv[]) {
                 cout << "Theta " << theta << " (A_theta generated/saved)\n";
             }
 
-            // server p' precompute for this theta
             {
                 std::unique_ptr<ScopeTimer> t_theta;
                 if (log_per_theta) {
@@ -550,7 +428,7 @@ int main(int argc, char* argv[]) {
     timings.flush();
 
     cout << "\nTrusted setup complete.\n";
-    cout << "Timings: data/results/timings.setup_trusted.csv\n";
+    cout << "Timings: data/results/timings.setup_trusted.summary.csv\n";
     cout << "Run setup_clients next to build client precompute pads.\n";
     return 0;
 }

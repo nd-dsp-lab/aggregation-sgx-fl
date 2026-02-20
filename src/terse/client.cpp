@@ -1,5 +1,17 @@
-// client.cpp
+// client.cpp (SUMMARY CSV timings)
+//
+// Writes aggregated summary timing stats to:
+//   data/results/timings.client.summary.csv
+//
+// CSV columns:
+//   component,phase,count,mean_us,stddev_us,min_us,max_us,range_us
+//
+// Optional env vars:
+// - TERSE_LOG_PER_VECTOR=1  -> include per-vector phases in the summary
+
 #include "terse/terse.h"
+#include "common/terse_timings_summary.h"
+
 #include <iostream>
 #include <iomanip>
 #include <filesystem>
@@ -9,11 +21,8 @@
 #include <omp.h>
 
 #include <fstream>
-#include <sstream>
-#include <mutex>
 #include <vector>
 #include <cstdlib>
-#include <ctime>
 
 using namespace std;
 
@@ -56,119 +65,6 @@ static vector<vector<NativeInteger>> load_client_precomputes(size_t n_clients, s
     return precomputes;
 }
 
-// ---------------------- CSV timing utilities ----------------------
-
-static uint64_t unix_time_ns() {
-    timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-class CsvTimings {
-public:
-    explicit CsvTimings(string path) : path_(std::move(path)) {}
-
-    void log_event(uint64_t unix_ns,
-                   const string& component,
-                   const string& phase,
-                   int64_t client_idx,
-                   int64_t ts,
-                   int64_t vector_dim,
-                   int64_t n_clients,
-                   int64_t n_timestamps,
-                   uint64_t duration_us) {
-        // Buffer in memory; flush at end (or you can add periodic flushing if needed).
-        ostringstream oss;
-        oss << unix_ns << ","
-            << component << ","
-            << phase << ","
-            << client_idx << ","
-            << ts << ","
-            << vector_dim << ","
-            << n_clients << ","
-            << n_timestamps << ","
-            << duration_us
-            << "\n";
-
-        lock_guard<mutex> lk(mu_);
-        buf_.push_back(oss.str());
-    }
-
-    void flush() {
-        lock_guard<mutex> lk(mu_);
-
-        filesystem::create_directories(filesystem::path(path_).parent_path());
-
-        const bool need_header = !file_exists_nonempty_();
-        ofstream out(path_, ios::app);
-        if (!out) throw runtime_error("Failed to open timings file: " + path_);
-
-        if (need_header) {
-            out << "unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us\n";
-        }
-        for (const auto& line : buf_) out << line;
-        buf_.clear();
-    }
-
-    ~CsvTimings() {
-        try { flush(); } catch (...) {}
-    }
-
-private:
-    bool file_exists_nonempty_() const {
-        ifstream in(path_, ios::binary);
-        return in.good() && in.peek() != ifstream::traits_type::eof();
-    }
-
-    string path_;
-    mutex mu_;
-    vector<string> buf_;
-};
-
-class ScopeTimer {
-public:
-    using Clock = std::chrono::steady_clock;
-
-    ScopeTimer(CsvTimings& timings,
-               string component,
-               string phase,
-               int64_t client_idx,
-               int64_t ts,
-               int64_t vector_dim,
-               int64_t n_clients,
-               int64_t n_timestamps)
-        : timings_(timings),
-          component_(std::move(component)),
-          phase_(std::move(phase)),
-          client_idx_(client_idx),
-          ts_(ts),
-          vector_dim_(vector_dim),
-          n_clients_(n_clients),
-          n_timestamps_(n_timestamps),
-          unix_ns_(unix_time_ns()),
-          start_(Clock::now()) {}
-
-    ~ScopeTimer() {
-        auto end = Clock::now();
-        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
-        timings_.log_event(unix_ns_, component_, phase_, client_idx_, ts_, vector_dim_, n_clients_, n_timestamps_, us);
-    }
-
-private:
-    CsvTimings& timings_;
-    string component_;
-    string phase_;
-    int64_t client_idx_;
-    int64_t ts_;
-    int64_t vector_dim_;
-    int64_t n_clients_;
-    int64_t n_timestamps_;
-    uint64_t unix_ns_;
-    Clock::time_point start_;
-};
-
-// ---------------------- main ----------------------
-
 int main(int argc, char* argv[]) {
     omp_set_num_threads(1);
 
@@ -181,8 +77,7 @@ int main(int argc, char* argv[]) {
     size_t n_timestamps = stoull(argv[2]);
     size_t vector_dim = stoull(argv[3]);
 
-    // CSV timings: buffered, minimal console output
-    CsvTimings timings("data/results/timings.client.csv");
+    CsvTimings timings("data/results/timings.client.summary.csv");
     const bool log_per_vector = (std::getenv("TERSE_LOG_PER_VECTOR") != nullptr);
 
     TERSEParams params = load_params();
@@ -207,7 +102,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    cout << "=== TERSE Client Encryption (CSV timings -> data/results/timings.client.csv) ===" << endl;
+    cout << "=== TERSE Client Encryption (summary CSV -> data/results/timings.client.summary.csv) ===" << endl;
 
     vector<vector<NativeInteger>> client_precomputes;
     {
@@ -235,13 +130,11 @@ int main(int argc, char* argv[]) {
             TERSEClient client;
             client.precomputed_p = client_precomputes[client_idx];
 
-            // Optional: total per client
             ScopeTimer client_t(timings, "client", "encrypt_client_total",
                                 (int64_t)client_idx, -1, (int64_t)vector_dim,
                                 (int64_t)n_clients, (int64_t)n_timestamps);
 
             for (size_t ts = 0; ts < n_timestamps; ts++) {
-                // Optional: per vector (can be large; gated by env var)
                 std::unique_ptr<ScopeTimer> vec_t;
                 if (log_per_vector) {
                     vec_t = std::make_unique<ScopeTimer>(
@@ -270,7 +163,6 @@ int main(int argc, char* argv[]) {
                      (int64_t)vector_dim, (int64_t)n_clients, (int64_t)n_timestamps);
 
         for (size_t client_idx = 0; client_idx < n_clients; client_idx++) {
-            // Optional per-client save timing (small number of events)
             ScopeTimer t_client(timings, "client", "save_ciphertexts_client",
                                 (int64_t)client_idx, -1, (int64_t)vector_dim,
                                 (int64_t)n_clients, (int64_t)n_timestamps);
@@ -297,10 +189,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Flush once at the end to minimize overhead
     timings.flush();
 
-    cout << "Done. Timings: data/results/timings.client.csv" << endl;
+    cout << "Done. Timings: data/results/timings.client.summary.csv" << endl;
     if (log_per_vector) {
         cout << "Per-vector timing was ENABLED (TERSE_LOG_PER_VECTOR set)." << endl;
     } else {
