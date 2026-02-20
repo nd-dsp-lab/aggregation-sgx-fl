@@ -1,12 +1,18 @@
-// setup_clients.cpp (updated; backward compatible) + CSV timings
+// setup_clients.cpp (SUMMARY CSV timings)
 //
-// Writes buffered CSV timing events to: data/results/timings.setup_clients.csv
+// Writes aggregated summary timing stats to:
+//   data/results/timings.setup_clients.summary.csv
+//
+// CSV columns:
+//   component,phase,count,mean_us,stddev_us,min_us,max_us,range_us
 //
 // Optional env vars to control granularity:
-// - TERSE_LOG_PER_THETA=1        -> emit per-theta events (A_theta load + precompute)
-// - TERSE_LOG_PER_CLIENT=1       -> emit per-client events inside each theta (can be large)
+// - TERSE_LOG_PER_THETA=1        -> include per-theta phases in the summary
+// - TERSE_LOG_PER_CLIENT=1       -> include per-client phases inside each theta in the summary
 
 #include "terse/terse.h"
+#include "common/terse_timings_summary.h"
+
 #include <omp.h>
 
 #include <chrono>
@@ -17,11 +23,7 @@
 #include <vector>
 #include <fstream>
 #include <string>
-
-#include <sstream>
-#include <mutex>
 #include <cstdlib>
-#include <ctime>
 
 using namespace std;
 
@@ -73,123 +75,13 @@ static void save_client_precomputes(const vector<TERSEClient>& clients,
     }
 }
 
-// ---------------------- CSV timing utilities ----------------------
-
-static uint64_t unix_time_ns() {
-    timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-class CsvTimings {
-public:
-    explicit CsvTimings(string path) : path_(std::move(path)) {}
-
-    void log_event(uint64_t unix_ns,
-                   const string& component,
-                   const string& phase,
-                   int64_t client_idx,
-                   int64_t ts,
-                   int64_t vector_dim,
-                   int64_t n_clients,
-                   int64_t n_timestamps,
-                   uint64_t duration_us) {
-        ostringstream oss;
-        oss << unix_ns << ","
-            << component << ","
-            << phase << ","
-            << client_idx << ","
-            << ts << ","
-            << vector_dim << ","
-            << n_clients << ","
-            << n_timestamps << ","
-            << duration_us
-            << "\n";
-
-        lock_guard<mutex> lk(mu_);
-        buf_.push_back(oss.str());
-    }
-
-    void flush() {
-        lock_guard<mutex> lk(mu_);
-
-        filesystem::create_directories(filesystem::path(path_).parent_path());
-
-        const bool need_header = !file_exists_nonempty_();
-        ofstream out(path_, ios::app);
-        if (!out) throw runtime_error("Failed to open timings file: " + path_);
-
-        if (need_header) {
-            out << "unix_ns,component,phase,client_idx,ts,vector_dim,n_clients,n_timestamps,duration_us\n";
-        }
-        for (const auto& line : buf_) out << line;
-        buf_.clear();
-    }
-
-    ~CsvTimings() {
-        try { flush(); } catch (...) {}
-    }
-
-private:
-    bool file_exists_nonempty_() const {
-        ifstream in(path_, ios::binary);
-        return in.good() && in.peek() != ifstream::traits_type::eof();
-    }
-
-    string path_;
-    mutex mu_;
-    vector<string> buf_;
-};
-
-class ScopeTimer {
-public:
-    using Clock = std::chrono::steady_clock;
-
-    ScopeTimer(CsvTimings& timings,
-               string component,
-               string phase,
-               int64_t client_idx,
-               int64_t ts,
-               int64_t vector_dim,
-               int64_t n_clients,
-               int64_t n_timestamps)
-        : timings_(timings),
-          component_(std::move(component)),
-          phase_(std::move(phase)),
-          client_idx_(client_idx),
-          ts_(ts),
-          vector_dim_(vector_dim),
-          n_clients_(n_clients),
-          n_timestamps_(n_timestamps),
-          unix_ns_(unix_time_ns()),
-          start_(Clock::now()) {}
-
-    ~ScopeTimer() {
-        auto end = Clock::now();
-        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
-        timings_.log_event(unix_ns_, component_, phase_, client_idx_, ts_, vector_dim_, n_clients_, n_timestamps_, us);
-    }
-
-private:
-    CsvTimings& timings_;
-    string component_;
-    string phase_;
-    int64_t client_idx_;
-    int64_t ts_;
-    int64_t vector_dim_;
-    int64_t n_clients_;
-    int64_t n_timestamps_;
-    uint64_t unix_ns_;
-    Clock::time_point start_;
-};
-
 // ---------------------- main ----------------------
 
 int main(int argc, char* argv[]) {
     omp_set_num_threads(1);
     ensure_data_dir();
 
-    CsvTimings timings("data/results/timings.setup_clients.csv");
+    CsvTimings timings("data/results/timings.setup_clients.summary.csv");
     const bool log_per_theta = (std::getenv("TERSE_LOG_PER_THETA") != nullptr);
     const bool log_per_client = (std::getenv("TERSE_LOG_PER_CLIENT") != nullptr);
 
@@ -223,7 +115,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    cout << "=== TERSE Client Setup (Precompute Only; CSV -> data/results/timings.setup_clients.csv) ===\n";
+    cout << "=== TERSE Client Setup (Precompute Only; summary CSV -> data/results/timings.setup_clients.summary.csv) ===\n";
 
     // Trusted setup must have run first.
     TERSEParams params = TERSEParams::load("data/params.bin");
@@ -293,7 +185,6 @@ int main(int argc, char* argv[]) {
                            (int64_t)requested_clients, (int64_t)requested_timestamps);
 
         for (uint64_t theta = 0; theta < n_theta; theta++) {
-            // A_theta load timing
             std::unique_ptr<ScopeTimer> t_theta_load;
             if (log_per_theta) {
                 t_theta_load = std::make_unique<ScopeTimer>(
@@ -311,7 +202,6 @@ int main(int argc, char* argv[]) {
                 cout << "Theta " << theta << " (A_theta loaded)\n";
             }
 
-            // Precompute timing (batch)
             std::unique_ptr<ScopeTimer> t_theta_pre;
             if (log_per_theta) {
                 t_theta_pre = std::make_unique<ScopeTimer>(
@@ -329,7 +219,6 @@ int main(int argc, char* argv[]) {
                     system.precompute_client_batch(clients[i], A_theta);
                 }
             } else {
-                // Keep overhead low: do not emit per-client events by default
                 for (size_t i = 0; i < clients.size(); i++) {
                     system.precompute_client_batch(clients[i], A_theta);
                 }
@@ -337,12 +226,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Resize to requested streams (as in your original)
     for (auto& client : clients) {
         client.precomputed_p.resize(total_streams);
     }
 
-    // Save precomputes
     {
         ScopeTimer t_save_total(timings, "setup_clients", "save_client_precomputes_total",
                                 -1, -1, (int64_t)requested_vector_dim,
@@ -351,10 +238,9 @@ int main(int argc, char* argv[]) {
         if (log_per_client) {
             for (size_t idx = 0; idx < clients.size(); idx++) {
                 ScopeTimer t_one(timings, "setup_clients", "save_client_precomputes_client",
-                                (int64_t)idx, -1, (int64_t)requested_vector_dim,
-                                (int64_t)requested_clients, (int64_t)requested_timestamps);
+                                 (int64_t)idx, -1, (int64_t)requested_vector_dim,
+                                 (int64_t)requested_clients, (int64_t)requested_timestamps);
 
-                // Save exactly one client (reuse existing logic safely)
                 vector<TERSEClient> one(1);
                 one[0] = clients[idx];
                 save_client_precomputes(one, total_streams);
@@ -367,7 +253,7 @@ int main(int argc, char* argv[]) {
     timings.flush();
 
     cout << "\nClient precompute artifacts saved to ./data\n";
-    cout << "Timings: data/results/timings.setup_clients.csv\n";
+    cout << "Timings: data/results/timings.setup_clients.summary.csv\n";
     cout << "You can now run Python tests / FL runtime.\n";
     return 0;
 }

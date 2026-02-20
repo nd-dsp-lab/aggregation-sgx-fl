@@ -23,6 +23,8 @@ data/
 benchmark_results.txt
 *.bin
 *.txt
+*/__pycache__
+*.pt
 
 # Logs and temporary files
 *.log
