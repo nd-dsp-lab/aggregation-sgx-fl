@@ -57,7 +57,8 @@ public:
 
     ~ScopeTimer() {
         auto end = Clock::now();
-        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
+        uint64_t us =
+            (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
 
         // These extra fields are ignored by CsvTimings in summary mode.
         timings_.log_event(/*unix_ns=*/0,
