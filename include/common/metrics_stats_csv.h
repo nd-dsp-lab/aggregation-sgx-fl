@@ -1,10 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -53,7 +55,17 @@ struct OpKeyHash {
 
 class StatsCsvSink {
 public:
-    explicit StatsCsvSink(std::string path) : path_(std::move(path)) {}
+    // Same signature as before (no call-site changes).
+    // New behavior: truncates the file at construction so each run starts fresh.
+    explicit StatsCsvSink(std::string path)
+        : path_(std::move(path)) {
+        // Truncate + write header immediately.
+        std::ofstream out(path_, std::ios::trunc);
+        if (!out.good()) {
+            throw std::runtime_error("Failed to open metrics file for writing: " + path_);
+        }
+        out << "component,phase,count,mean_us,stddev_us,min_us,max_us,range_us\n";
+    }
 
     void add(const std::string& component, const std::string& phase, uint64_t duration_us) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -62,11 +74,12 @@ public:
 
     void flush() {
         std::lock_guard<std::mutex> lk(mu_);
-        const bool need_header = !file_exists_nonempty_();
+        if (stats_.empty()) return;
 
+        // Append the current in-memory summary rows.
         std::ofstream out(path_, std::ios::app);
-        if (need_header) {
-            out << "component,phase,count,mean_us,stddev_us,min_us,max_us,range_us\n";
+        if (!out.good()) {
+            throw std::runtime_error("Failed to open metrics file for append: " + path_);
         }
 
         for (const auto& kv : stats_) {
@@ -96,11 +109,6 @@ public:
     }
 
 private:
-    bool file_exists_nonempty_() const {
-        std::ifstream in(path_, std::ios::binary);
-        return in.good() && in.peek() != std::ifstream::traits_type::eof();
-    }
-
     std::string path_;
     std::mutex mu_;
     std::unordered_map<OpKey, OnlineStats, OpKeyHash> stats_;
@@ -118,7 +126,8 @@ public:
 
     ~StatsScopeTimer() {
         auto end = Clock::now();
-        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
+        uint64_t us =
+            (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
         sink_.add(component_, phase_, us);
     }
 
